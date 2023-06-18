@@ -13,7 +13,7 @@ library(readxl)
 subset_Fe <- read_excel("subset_Fe.xlsx")
 ```
 
-Si hubiesen problemas para ejecutar el código es importante comprobar se encuentran instalados los principales paquetes empleados, a destacar
+Si hubiesen problemas para ejecutar el código es importante comprobar se encuentran instalados los principales paquetes empleados, a destacar:
 
 ```{r}
 library(purr)
