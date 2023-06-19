@@ -10,7 +10,7 @@ A su vez, para permitir su reproducibilidad a usuarios sin acceso a estos parám
 
 ```{r}
 library(readxl)
-subset_Fe <- read_excel("subset_Fe.xlsx")
+subset_Fe <- read_excel("subset_Fe_UOC_JFV.xlsx")
 ```
 
 Si hubiesen problemas para ejecutar el código es importante comprobar se encuentran instalados los principales paquetes empleados, a destacar:
