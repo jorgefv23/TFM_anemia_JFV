@@ -1,0 +1,908 @@
+---
+title: 'Anemia_B12_UOC_JFV'
+author: "Jorge FV"
+date: "2023-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Importar conjunto de datos y tratamiento previo
+
+Abrimos la base de datos mediante la función read_excel del paquete readxl
+
+```{r}
+library(readxl)
+subset_B12 <- read_excel("subset_B12_UOC_JFV.xlsx")
+```
+
+Mediante str realizamos un análisis exploratorio de los datos (por motivos estéticos ejemplificamos con las primeras 5 variables)
+
+```{r}
+nrow(subset_B12)
+ncol(subset_B12)
+str((subset_B12)[,1:5])
+```
+
+Nos interesa que tanto nuestra variable respuesta, como la variable sexo, estén en forma de factor, no numérico
+
+```{r}
+subset_B12$B12<-factor(subset_B12$B12,levels = c(1,2),
+labels = c("Déficit", "Normal"))
+str(subset_B12$B12)
+```
+
+```{r}
+subset_B12$Sexo <- ifelse(subset_B12$Sexo == 1, "Hombre", "Mujer")
+subset_B12$Sexo <- as.factor(subset_B12$Sexo)
+str(subset_B12$Sexo)
+```
+
+Comprobamos que no existan valores perdidos en nuestra base de datos. En nuestro caso sí hay, así que comprobamos en qué variable tenemos estos valores perdidos, obteniendo que existen algunos valores NA, principalmente asociados a eritroblastos y edad
+
+```{r}
+library(purrr)
+any(!complete.cases(subset_B12))
+map_dbl(subset_B12, .f = function(x){sum(is.na(x))})
+```
+
+Procedemos a eliminar las filas que incluyan los valores perdidos. Al ser pocas podemos eliminarlas ya que no tendrá gran influencia, de haber sido más hubiesemos procedido a estudiar la importancia de la variable y en caso necesario realizar imputación de los valores ausentes
+
+```{r}
+delete.na <- function(df, n=0) {
+ df[rowSums(is.na(df)) <= n,]
+}
+subset_B12<-delete.na(subset_B12)
+```
+
+# Análisis Exploratorio de los datos
+
+Respecto a la distribución de la variable respuesta como se puede observar tenemos datos muy desbalanceados en nuestra base de datos con una mayor proporción de pacientes normales y notablemente inB12rior en déficit. Posteriormente trabajaremos con métodos de data augmentation o undersampling para corregir este desbalanceo de datos
+
+```{r}
+library(ggplot2)
+ggplot(data = subset_B12, aes(x = B12, y = after_stat(count), fill = B12)) +
+  geom_bar() +
+  scale_fill_manual(values = c("chocolate4","chartreuse3"))+
+  labs(title = "Déficit B12") +
+  theme_bw() +
+  theme(legend.position = "right")
+```
+
+Podemos observar mediante representación en boxplot como las variables se presentan en diferentes escalas (p.e. las plaquetas), por lo que tendremos que normalizar los datos
+
+```{r}
+boxplot(subset_B12[,2:111], which="all", las=1, main="Distribución de variables", col="grey")
+```
+
+Podemos observar la distribución de cada variable respecto al déficit de B12 para ver si siguen una distribución normal y detectar posibles valores atípicos así como realizar inferencias sobre posibles variables que puedan estar más relacionadas con el déficit de B12
+
+```{r}
+library(ggpubr)
+library(cowplot)
+
+# Se define una función para crear los gráficos de distribución
+distribucion_plot <- function(data, x_var, fill_var) {
+  plot1 <- ggplot(data = data, aes(x = !!sym(x_var), fill = !!sym(fill_var))) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("brown4","green")) +
+    geom_rug(aes(color = !!sym(fill_var)), alpha = 0.5) +
+    scale_color_manual(values = c("brown4","green")) +
+    theme_bw()
+
+  plot2 <- ggplot(data = data, aes(x = !!sym(fill_var), y = !!sym(x_var), color = !!sym(fill_var))) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(alpha = 0.3, width = 0.15) +
+    scale_color_manual(values = c("brown4","green")) +
+    theme_bw()
+
+  final_plot <- ggarrange(plot1, plot2, legend = "top")
+  final_plot <- annotate_figure(final_plot, top = text_grob(x_var, size = 15))
+  
+  return(final_plot)
+}
+
+multiplesplots <- function(data, fill_var) {
+  x_vars <- names(data)[!names(data) %in% fill_var]
+    plots <- map(x_vars, function(x_var) {
+    distribucion_plot(data, x_var, fill_var)
+  })
+  return(plots)
+}
+```
+
+A modo de ejemplo, únicamente representaré la Edad, para así no aumentar el coste computacional
+
+```{r}
+distribucion_B12 <- subset(subset_B12, select = c("B12","MNVMO"))
+graf_distribucion_B12 <- multiplesplots(distribucion_B12, "B12")
+graf_distribucion_B12
+```
+
+Otra forma de comparar los grupos es mediante sus medias y desviaciones estándar con la función aggregate()
+
+```{r}
+medias_B12 <- aggregate(. ~ B12, subset_B12, function(x) c(mean = mean(x), sd = sd(x)))
+medias_B12
+```
+
+Y comprobamos que existan diferencias estadísticamente significativas en las variables respecto a la de respuesta
+
+```{r}
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+
+# En primer lugar se crea un long subset con todos los valores menos la edad, que es la única variable no cuantitativa
+
+long_subset_B12 <- subset_B12[,-3] %>%
+  pivot_longer(-B12, names_to = "variables", values_to = "Valor")
+
+long_subset_B12 %>% sample_n(ncol(subset_B12)-1)
+
+# Y se calcula el p-valor
+t_student_B12 <- long_subset_B12 %>%
+  group_by(variables) %>%
+  t_test(Valor ~ B12) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance()
+
+t_student_B12
+
+# Para visualizar mejor, seleccionamos aquellas 6 variables de menor p-valor
+ordenado_t_student_B12<- t_student_B12[order(t_student_B12$p.adj),]
+head(ordenado_t_student_B12[,1])
+```
+
+Respecto a nuestra variable cualitativa Sexo, vemos cómo se distribuyen los datos de la variable predictora B12
+
+```{r}
+ggplot(data = subset_B12, aes(x = Sexo, y = after_stat(count), fill = B12)) +
+  geom_bar() +
+  scale_fill_manual(values = c("brown4","green")) +
+  labs(title = "Distribución") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Y en cuanto a proporciones los resultados son similares no existiendo diferencias muy significativas entre grupos por sexo
+
+```{r}
+prop.table(table(subset_B12$Sexo, subset_B12$B12), margin = 1) %>% round(digits = 2)
+```
+
+# Preprocesado de los datos
+
+En este caso, al sólo tener una variable categórica (sexo), únicamente se realiza una categorización dummy. Todo ello para evitar "dummy variable trap" y que ambas tengan una colinealidad perB12cta
+
+```{r}
+library(caret)
+dummy_B12 <- dummyVars(" ~ Sexo", data = subset_B12, fullRank = T)
+dummy_sexo_B12 <- data.frame(predict(dummy_B12, newdata = subset_B12))
+subset_B12$Sexo<-dummy_sexo_B12
+```
+
+Comprobamos que no existan variables de varianza cero mediante la función nearZeroVar(). Esta proporciona información en forma de tabla acerca de freqRatio (proporción del valor más repetido respecto al segundo más repetido, nos interesa que sea lo más bajo posible) y percentUnique (porcentaje de valores únicos, cuanto más alto mejor). La propia función te indica que ninguna variable debería ser eliminada por presentar varianza cero
+
+```{r}
+nzv_B12 <- nearZeroVar(subset_B12, saveMetrics= TRUE)
+nzv_B12
+```
+
+Otro de los pasos fundamentales del preprocesado es la eliminación de variables altamente correlacionadas. Mediante la función findCorrelation(), también del paquete caret, podemos hallar aquellas con una alta correlación (en este caso establecemos un cut-off de 0.8)
+
+```{r}
+# Separamos la variable predictora para que no interfiera en la matriz de correlaciones
+B12<-data.frame(subset_B12$B12)
+subset_corr_B12<-subset_B12[,-1]
+# Mediante función cor() obtenemos correlaciones entre las variables
+correlacion_B12<-cor(subset_corr_B12)
+# Podemos ver qué variables están relacionadas entre sí
+var_correlacionadas_B12<-findCorrelation(correlacion_B12,cutoff=0.8,verbose=TRUE)
+# Cuáles son las variables a eliminar
+findCorrelation(correlacion_B12,cutoff=0.8,names=TRUE)
+# Y la posición del dataframe de estas variables
+var_correlacionadas_B12
+```
+
+Eliminamos estas variables que no interesan
+
+```{r}
+elim_corr_B12<-subset_corr_B12[-var_correlacionadas_B12]
+dim(elim_corr_B12)
+```
+
+En el caso de combinaciones lineales de varias variables será util la función findLinearCombos, que en este caso no detecta ninguna variable a eliminar
+
+```{r}
+correlacion_lineal_B12<-cor(elim_corr_B12)
+findLinearCombos(correlacion_lineal_B12)
+```
+
+Finalmente, volvemos a añadir la variable predictora, modificamos nombre de variables y dejamos listo el data.frame
+
+```{r}
+subset_B12<-cbind(B12,elim_corr_B12)
+subset_B12$Sexo<-as.numeric(unlist(subset_B12$Sexo))
+colnames(subset_B12)[colnames(subset_B12)=="subset_B12.B12"]<-"B12"
+colnames(subset_B12)[colnames(subset_B12)=="Sexo$Sexo.Mujer"]<-"Sexo"
+```
+
+Una vez eliminados los valores nulos, las variables con alta correlación y categorizado los factores, se procede a separar el data set en subconjuntos de training y test mediante la función createDataPartition
+
+```{r}
+# En primer lugar, aleatorizamos los datos
+set.seed(230793)
+library(dplyr)
+subset_B12<- sample_n(subset_B12,nrow(subset_B12))
+```
+
+Separamos los datos en training y test
+
+```{r}
+# 80% datos serán para entrenamiento y 20% para test
+set.seed(230793)
+particion_B12<-createDataPartition(y=subset_B12$B12,p=0.8,list=FALSE)
+training_B12<-subset_B12[particion_B12,]
+test_B12<-subset_B12[-particion_B12,]
+```
+
+Con el objetivo de normalizar los datos y evitar que los valores más elevados (como las plaquetas) influyan en el resto se realiza un escalado de los datos. Los datos de test se escalan con la media y sd de los datos de entrenamiento
+
+```{r}
+procesar_train_B12<-preProcess(training_B12, method=c("center","scale"))
+training_esc_B12<-predict(procesar_train_B12,training_B12)
+test_esc_B12<-predict(procesar_train_B12,test_B12)
+```
+
+# Influencia variables
+
+Vemos qué variables tienen más importancia sobre la variable B12
+
+Pero antes de continuar, a fin de aumentar la eficiencia computacional y que el proceso sea más rápido, paralelizamos el proceso ya que hay funciones y algoritmos que pueden llegar a tardar hasta una hora
+
+Realizamos una selección de variables más relevantes respecto a la respuesta B12 mediante el paquete Boruta()
+
+```{r}
+set.seed(230793)
+library(Boruta)
+boruta_B12 <- Boruta(B12 ~ ., data=training_esc_B12, doTrace=1)
+```
+
+Podemos comprobar cuáles confirma como variables importantes, cuáles elimina y cuáles son posiblemente importantes. Como podemos ver, selecciona la HCM como variable más relevante
+
+```{r}
+boruta_B12$finalDecision
+# Seleccionamos aquellos atributos más importantes (incluído los tentatives)
+boruta_signif_B12 <- getSelectedAttributes(boruta_B12, withTentative = TRUE)
+
+# Representamos gráficamente y vemos en color verde aquellas que confirma como relevantes, en amarillo las posibles y en rojo las que descarta
+plot(boruta_B12, cex.axis=.5, las=2, xlab="", main="Importancia de las variables")
+```
+
+Eliminamos las variables no relevantes de training y test para poder trabajar posteriormente con ellas
+
+```{r}
+training_boruta_B12<-training_esc_B12[,boruta_signif_B12]
+training_boruta_B12<-cbind(training_esc_B12$B12,training_boruta_B12)
+colnames(training_boruta_B12)[colnames(training_boruta_B12)=="training_esc_B12$B12"]<-"B12"
+
+test_boruta_B12<-test_esc_B12[,boruta_signif_B12]
+test_boruta_B12<-cbind(test_esc_B12$B12,test_boruta_B12)
+colnames(test_boruta_B12)[colnames(test_boruta_B12)=="test_esc_B12$B12"]<-"B12"
+```
+
+Una alternativa a Boruta para la selección de características cuando tenemos muchas y estas pueden influenciar en el modelo (overfitting) es mediante la librería glmnet() una regularización Lasso 
+
+```{r}
+set.seed(230793)
+library(glmnet)
+# Separamos variable respuesta de resto
+y <- training_smote_B12$B12
+x<- data.matrix(training_smote_B12[,-1])
+
+# Seleccionamos alpha=1, de lo contrario si fuera 0 sería una regularización Ridge
+cv_model_B12 <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+plot(cv_model_B12) 
+cv_model_B12
+```
+
+Se representa gráficamente la varianza
+
+```{r}
+plot(cv_model_B12$glmnet.fit,"lambda", label=FALSE)
+
+mejor_lambda_B12 <- cv_model_B12$lambda.min
+mejor_modelo_B12 <- glmnet(x, y, alpha = 1, lambda = mejor_lambda_B12,family = "binomial")
+```
+
+Finalmente, con la función coef() podemos ver qué aporta cada variable, observando  la CHCM como parámetro principal
+
+```{r}
+coeficientes_B12<-coef(mejor_modelo_B12)
+coeficientes_B12
+```
+
+Volvemos a unir la variable respuesta con el resto de variable una vez eliminadas aquellas con varianza 0
+
+```{r}
+df_coeficientes_B12 <- as.data.frame(x[, coeficientes_B12@i[-1]])
+training_lasso_B12<-as.data.frame(cbind(y, df_coeficientes_B12))
+colnames(training_lasso_B12)[colnames(training_lasso_B12)=="y"]<-"B12"
+
+# Y realizamos lo mismo con el conjunto test, eliminando aquellas variables innecesarias
+w <- test_esc_B12$B12
+z<- data.matrix(test_esc_B12[,-1])
+test_coeficientes_B12 <- as.data.frame(z[, coeficientes_B12@i[-1]])
+test_lasso_B12<-as.data.frame(cbind(w, test_coeficientes_B12))
+colnames(test_lasso_B12)[colnames(test_lasso_B12)=="w"]<-"B12"
+```
+
+Otra alternativa disponible en el preprocesado de datos para selección de variables o, en este caso, reducción de la dimensionalidad, será un análisis de componentes principales de tal forma podamos seguir eliminando más variables redundantes
+
+```{r}
+# No es necesario escalar ya que ya lo hemos realizado previamente por eso indicamos scale=FALSE
+pre_pca_B12 = prcomp(training_esc_B12[,-1], scale=FALSE)
+head(pre_pca_B12$rotation[,1:5])
+```
+
+```{r}
+# Realizando summary() podemos ver la varianza aportada por cada componente principal
+summary(pre_pca_B12)
+# Comparamos PC1 y PC2. A priori no hay diferencias llamativas
+library(factoextra)
+fviz_pca_ind(pre_pca_B12, geom.ind = "point",col.ind = "gray", axes = c(1, 2),pointsize = 1.5,habillage = training_esc_B12$B12)
+```
+
+Mediante la función get_pca_var podemos comprobar los loadings que explican los coeficientes de contribución de las variables en cada componente principal. A ejemplo mostraremos la contribución de las primeras 5 variables y la variable de mayor contribución en el primer componente
+
+```{r}
+var_B12 <- get_pca_var(pre_pca_B12)
+head(var_B12$contrib[,1:5])
+which.max(var_B12$contrib[,1])
+```
+
+Que queda mejor reflejado gráficamente mediante la función fviz_screeplot() de caret. Como ejemplo, se observa en el gráfico que para el componente principal 1 la variable SDAL2NE aporta la mayor variación
+
+```{r}
+fviz_contrib(pre_pca_B12, choice = "var", axes = 1, top = 10)
+```
+
+Otro gráfico interesante es este en el que podemos ver como al aumentar el número de componente principal la varianza explicada va disminuyendo
+
+```{r}
+library(psych)
+covarianza_B12<-cov(training_esc_B12[,-1])
+eigenvalues_B12 <- eigen(covarianza_B12)$values
+plot(eigenvalues_B12/tr(covarianza_B12), xlab = "Componente Principal", ylab = "Proporción de varianza explicada", type = "b") 
+```
+
+O en el acumulado
+
+```{r}
+varianza_B12<-100*pre_pca_B12$sdev^2/sum(pre_pca_B12$sdev^2)
+acumulado_B12<-cumsum(varianza_B12)
+plot(acumulado_B12)
+```
+
+Este análisis de componentes principales también puede realizarse mediante caret con la función preProcess y method=PCA, seleccionando en thresh el valor 95% que es el que queremos explicar. Dejaré el código anterior sobre función prcomp ya que me ha servido para entender mejor el concepto de PCA
+
+```{r}
+pca_caret_train_B12<- preProcess(training_esc_B12, method = "pca", thresh = 0.95, scale=FALSE, center=FALSE)
+# Como podemos ver, emplea mismo número de componentes principales para explicar varianza 
+training_pca_B12<-predict(pca_caret_train_B12,training_esc_B12)
+length(training_pca_B12)
+# Convertimos también el grupo test mediante la misma transformación que la realizada al grupo train
+test_pca_B12<-predict(pca_caret_train_B12,test_esc_B12)
+pca_caret_train_B12
+```
+
+# Datos desbalanceados
+
+Como nuestros datos están desbalanceados vamos a aplicar técnicas de oversampling para conseguir que ambas clases se igualen. Una opción es SMOTE que se puede realizar mediante la librería performanceEstimation, con lo se generarán instancias sintéticas para sobremuestrear la clase minoritaria
+
+```{r}
+set.seed(230793)
+# Mediante la librería performanceEstimation con perc.over definimos la proporción de clase minoritaria que se generará, y mediante perc.under se realiza submuestreo de la clase mayoritaria
+library(performanceEstimation)
+training_smote_B12<-smote(B12~., training_esc_B12, perc.over=2.5, k=3, perc.under=1.5)
+training_smote_B12<- sample_n(training_smote_B12,nrow(training_smote_B12))
+
+# Comprobamos que tras realizar SMOTE los datos se balancean obteniendo similar proporción de clase minoritaria y mayoritaria
+table(training_smote_B12$B12)
+```
+
+# Entrenamiento del modelo
+
+Seguiré trabajando con caret debido al gran número de funciones y algoritmos disponibles así como la abundante bibliografía existente. Veamos la cantidad de algoritmos disponibles dentro este paquete
+
+```{r}
+names(getModelInfo())
+```
+
+## kNN
+
+```{r}
+# Vemos qué parámetros podemos modificar
+modelLookup('knn')
+```
+
+```{r}
+set.seed(230793)
+
+# Mediante trainControl seleccionaremos el valor de k más adecuado con validación cruzada en 10 partes y 5 repeticiones, sin que nos muestre el proceso y permitiendo el paralelismo para aumentar la velocidad del procesado
+control_knn <- trainControl(method = "repeatedcv",repeats = 5,number = 10, verboseIter = FALSE,allowParallel = TRUE,classProbs=TRUE)
+
+# Y definimos el grid de hiperparámetros a probar (k), de 1 a 100
+hiperparametros_knn<-expand.grid(k = seq(1, 100, 2)) 
+
+modelo_knn_B12 <- train(B12 ~ ., method = "knn", data = training_smote_B12,trControl=control_knn,tuneGrid=hiperparametros_knn, metric = "Accuracy")
+
+# Representamos el accuracy para cada valor de k y plot representativo
+modelo_knn_B12
+plot(modelo_knn_B12)
+```
+
+Seleccionamos el mejor hiperparámetro ya que posteriormente lo emplearé en la optimización del modelo
+
+```{r}
+knn_k_B12<-modelo_knn$bestTune[,1]
+```
+
+```{r}
+# Función predict para que prediga los resultados ya en el conjunto de test (al que eliminamos la variable respuesta)
+knn_predic_B12 <- predict(modelo_knn_B12, test_boruta_B12[,-1])
+# Para la evaluación, será de utilidad la función confusionMatrix()
+cm_knn_B12<-confusionMatrix(knn_predic_B12, test_boruta_B12$B12)
+cm_knn_B12
+```
+
+## SVM
+
+Comenzaremos con el modelo linear y seleccionando en los hiperparámetros los valores de cost
+
+```{r}
+modelLookup('svmLinear')
+```
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+# Elegimos el hiperparámetro a estudio probando con distintos cost
+hiperparametros_linear <- expand.grid(C = c(0.01,0.1,1,10,50))
+
+control_svm <- trainControl(method = "repeatedcv", number = 10, repeats=3, verboseIter = FALSE, allowParallel = TRUE, classProbs = TRUE)
+
+# Entrenamos el modelo
+
+modelo_svmlin_B12 <- train(B12 ~ ., data = training_lasso_B12,method = "svmLinear",tuneGrid = hiperparametros_linear,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmlin_B12
+plot(modelo_svmlin_B12)
+```
+
+```{r}
+set.seed(230793)
+svm_linear_predic_B12 <- predict(modelo_svmlin_B12, test_boruta_B12[,-1])
+cm_svm_linear_B12<-confusionMatrix(svm_linear_predic_B12, test_boruta_B12$B12)
+cm_svm_linear_B12
+```
+
+Probamos posteriormente con el modelo radial
+
+```{r}
+modelLookup('svmRadial')
+```
+
+En este caso también debemos seleccionar el hiperparámetro sigma, que especifica el ancho de la función de base radial, por lo que se modifica el tunegrid
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_radial <- expand.grid(sigma=c(0.001,0.01,0.1,1), C = c(0.1,10,50))
+
+modelo_svmrad_B12 <- train(B12 ~ ., data = training_smote_B12,method = "svmRadial",tuneGrid = hiperparametros_radial,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmrad_B12
+plot(modelo_svmrad_B12)
+```
+
+```{r}
+svm_radial_predic_B12 <- predict(modelo_svmrad_B12, test_boruta_B12[,-1])
+cm_svm_radial_B12<-confusionMatrix(svm_radial_predic_B12, test_boruta_B12$B12)
+cm_svm_radial_B12
+```
+
+Y finalmente comprobaremos el algoritmo con kernel polinómico
+
+```{r}
+modelLookup('svmPoly')
+```
+
+Aquí se debe seleccionar los hiperparámetros degree, scale y C, por lo que se vuelve a modificar el tunegrid
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_poly <- expand.grid(degree=c(2,3,4), scale=c(0.01,0.1,1), C = c(0.01,0.1,10,50))
+
+modelo_svmpoly_B12 <- train(B12 ~ ., data = training_smote_B12,method = "svmPoly",tuneGrid = hiperparametros_poly,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmpoly_B12
+plot(modelo_svmpoly_B12)
+```
+
+```{r}
+svm_poly_predic_B12 <- predict(modelo_svmpoly_B12, test_boruta_B12[,-1])
+cm_svm_poly_B12<-confusionMatrix(svm_poly_predic_B12, test_boruta_B12$B12)
+cm_svm_poly_B12
+```
+
+El mejor modelo ha sido el de kernel radial por lo que nos interesa guardar sus hiperparámetros:
+
+```{r}
+svm_sigma_B12<-modelo_svmrad_B12$bestTune[,1]
+svm_c_B12<-modelo_svmrad_B12$bestTune[,2]
+```
+
+## Tree
+
+Este algoritmo tiene de hiperparámetro "cp" que representa la complejidad del árbol
+
+```{r}
+modelLookup('rpart')
+```
+
+```{r}
+set.seed(230793)
+
+hiperparametros_tree<-expand.grid(cp = c(0.001,0.1,0.5,1))
+
+control_tree <- trainControl(method = "repeatedcv", number=10,repeats= 5,verboseIter = FALSE, allowParallel = FALSE, classProbs=TRUE)
+
+modelo_tree_B12 <- train(B12 ~ ., data = training_lasso_B12, method = "rpart",metric = "Accuracy",tuneGrid=hiperparametros_tree,trControl = control_tree, maxdepth=2)
+
+modelo_tree_B12
+plot(modelo_tree_B12)
+```
+
+```{r}
+tree_predic_B12 <- predict(modelo_tree_B12, test_esc_B12[,-1])
+cm_tree_B12<-confusionMatrix(tree_predic_B12, test_esc_B12$B12)
+cm_tree_B12
+```
+
+```{r}
+tree_cp_B12<-modelo_tree_B12$bestTune[,1]
+```
+
+## Random Forest
+
+```{r}
+modelLookup('ranger')
+```
+
+Modificamos en este caso los hiperparámetros mtry, min.node.size y splitrule
+
+```{r, cache=TRUE}
+set.seed(230793)
+hiperparametros_rf<-expand.grid(mtry =c(3,5,7,10,15),min.node.size=c(2,4,6),splitrule=c("gini","extratrees"))
+
+control_rf <- trainControl(method = "repeatedcv", number = 5, repeats=3, verboseIter = FALSE, allowParallel = FALSE, classProbs = TRUE)
+
+modelo_rf_B12 <- train(B12 ~ ., data = training_smote_B12,method = "ranger",tuneGrid = hiperparametros_rf,metric = "Accuracy",trControl = control_rf,num.trees=500)
+
+modelo_rf_B12
+plot(modelo_rf_B12)
+```
+
+```{r}
+rf_predic_B12 <- predict(modelo_rf_B12, test_esc_B12[,-1])
+cm_rf_B12<- confusionMatrix(rf_predic_B12, test_esc_B12$B12)
+cm_rf_B12
+```
+
+Nuevamente, seleccionamos los parámetros elegidos en el entrenamiento para posterior optimización
+
+```{r}
+rf_mtry_B12<-modelo_rf_B12$bestTune[,1]
+rf_splitrule_B12<-modelo_rf_B12$bestTune[,2]
+rf_node_B12<-modelo_rf_B12$bestTune[,3]
+```
+
+## Redes neuronales
+
+```{r}
+modelLookup('nnet')
+```
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_rn <- expand.grid(size = c(5,10,20,50),decay = c(0.001,0.01,0.1,1))
+
+control_rn <- trainControl(method = "repeatedcv", number = 3, verboseIter = FALSE, allowParallel = FALSE, classProbs = TRUE)
+
+# En este modelo tenemos que que ajustar el número máximo de iteraciones permitidas en la red neuronal MaxNWts, y seleccionamos trace=FALSE para que no nos muestre el proceso 
+
+modelo_rn_B12 <- train(B12 ~ ., data = training_smote_B12,method = "nnet", tuneGrid = hiperparametros_rn,metric = "Accuracy",trControl = control_rn,trace=FALSE,MaxNWts = 10000)
+
+modelo_rn_B12
+plot(modelo_rn_B12)
+```
+
+```{r}
+rn_predic_B12 <- predict(modelo_rn_B12, test_boruta_B12[,-1])
+cm_rn_B12<-confusionMatrix(rn_predic_B12, test_boruta_B12$B12)
+```
+
+```{r}
+rn_size_B12<-modelo_rn_B12$bestTune[,1]
+rn_decay_B12<-modelo_rn_B12$bestTune[,2]
+```
+
+## eXtreme Gradient Boosting
+
+```{r}
+modelLookup('xgbTree')
+```
+
+```{r, cache=TRUE}
+hiperparametros_xgb <- expand.grid(nrounds = c(20,50,70),max_depth = c(7,15),eta = c(0.01,0.1,0.5),gamma=c(0.2,0.4),colsample_bytree=0.8,min_child_weight=c(1,3),subsample=0.8)
+
+control_train <- trainControl(method = "repeatedcv", number = 10,repeats = 3,returnResamp = "final", verboseIter = FALSE,allowParallel = TRUE, classProbs = TRUE)
+
+modelo_xgb_B12 <- train(B12 ~ ., data = training_smote_B12, method = "xgbTree",tuneGrid = hiperparametros_xgb,metric = "Accuracy", iteration_range=100,trControl = control_train,verbose = FALSE, verbosity=0)
+
+modelo_xgb_B12
+plot(modelo_xgb_B12)
+```
+
+```{r}
+xgb_predic_B12 <- predict(modelo_xgb_B12, test_boruta_B12[,-1])
+cm_xgb_B12<-confusionMatrix(xgb_predic_B12, test_boruta_B12$B12)
+cm_xgb_B12
+```
+
+```{r}
+xgb_nrounds_B12<-modelo_xgb_B12$bestTune[,1]
+xgb_maxdepth_B12<-modelo_xgb_B12$bestTune[,2]
+xgb_eta_B12<-modelo_xgb_B12$bestTune[,3]
+xgb_gamma_B12<-modelo_xgb_B12$bestTune[,4]
+xgb_colsample_B12<-modelo_xgb_B12$bestTune[,5]
+xgb_weight_B12<-modelo_xgb_B12$bestTune[,6]
+xgb_subsample_B12<-modelo_xgb_B12$bestTune[,7]
+```
+
+# Evaluación de los distintos modelos
+
+Comparamos el accuracy de todos nuestros confusionMatrix para evaluar los distintos modelos
+
+```{r}
+modelo_B12<-c("knn","svmlin","svmradial","svmpoly","tree","rf","rn","xgb")
+
+F1_B12<-c(cm_knn_B12$byClass[7],cm_svm_linear_B12$byClass[7],cm_svm_radial_B12$byClass[7],cm_svm_poly_B12$byClass[7],cm_tree_B12$byClass[7],cm_rf_B12$byClass[7],cm_rn_B12$byClass[7],cm_xgb_B12$byClass[7])
+
+accuracy_B12<- c(cm_knn_B12$overall[1],cm_svm_linear_B12$overall[1],cm_svm_radial_B12$overall[1],cm_svm_poly_B12$overall[1],cm_tree_B12$overall[1],cm_rf_B12$overall[1],cm_rn_B12$overall[1],cm_xgb_B12$overall[1])
+
+kappa_B12<-c(cm_knn_B12$overall[2],cm_svm_linear_B12$overall[2],cm_svm_radial_B12$overall[2],cm_svm_poly_B12$overall[2],cm_tree_B12$overall[2],cm_rf_B12$overall[2],cm_rn_B12$overall[2],cm_xgb_B12$overall[2])
+
+evaluacion_B12<-data.frame(modelo_B12,F1_B12,accuracy_B12,kappa_B12)
+evaluacion_B12
+```
+
+Representamos gráficamente comparando el accuracy entre los distintos modelos 
+
+```{r}
+df_plot_B12<-cbind(as.data.frame(modelo_B12),as.data.frame(accuracy_B12),as.data.frame(kappa_B12))
+
+library(ggplot2)
+ggplot(df_plot_B12, aes(x=modelo,y=F1_B12))+
+  geom_bar(stat="identity", fill="cornsilk3")+
+  geom_text(aes(label=paste(round(kappa,2),sep="")),color="red",vjust=-1,size=2)+
+  geom_point(aes(y=kappa),shape="*", color="red",size=5)+
+  labs(x="Modelo",y="F1-score",title="Comparación entre modelos")+
+  theme(axis.text.x=element_text(angle=45,hjust=1))+
+  theme(panel.grid=element_blank())
+```
+
+# Optimización del modelo
+
+## Voting
+
+Una opción posible para intentar mejorar las predicciones de los distintos algoritmos es juntar las decisiones para cada observación de cada uno de ellos y elegir la mayoritaria. En este caso, descartamos el algoritmo Tree ya que parece tener una menor precisión en comparación con el resto y puede afectar negativamente a los resultados y los algoritmos svm con kernel linear y polinómico ya que las observaciones son muy similares
+
+```{r}
+# En primer lugar convertimos todas las predicciones obtenidas en data.frame, para posteriormente unirlas mediante cbind()
+
+df_knn_predic_B12<-as.data.frame(svm_linear_predic_B12)
+df_svm_linear_predic_B12<-as.data.frame(svm_linear_predic_B12)
+df_svm_radial_predic_B12<-as.data.frame(svm_radial_predic_B12)
+df_rf_predic_B12<-as.data.frame(rf_predic_B12)
+df_rn_predic_B12<-as.data.frame(rn_predic_B12)
+df_xgb_predic_B12<-as.data.frame(xgb_predic_B12)
+
+df_stacking_B12<-cbind(df_knn_predic_B12,df_svm_radial_predic_B12,df_rf_predic_B12,df_rn_predic_B12,df_xgb_predic_B12)
+
+# Ejemplo de las predicciones de cada algoritmo para las 5 primeras observaciones
+head(df_stacking_B12)
+
+# Generamos una función en la que obtengamos el valor más repetido de cada fila, y en caso de empate, lo asigne aleatoriamente
+prediccion_stacking_B12 <- apply(df_stacking_B12, 1, function(row) {
+  tab <- table(row)  
+  nombres <- names(tab)  
+  max_frecuencia <- max(tab)  
+  resultado <- nombres[tab == max_frecuencia] 
+  return(resultado)
+})
+# Ejemplo de las 5 primeras observaciones
+head(prediccion_stacking_B12)
+
+# Pasamos a factor para poder comparar las predicciones con su valor real
+factor_stacking_B12<-as.data.frame(as.factor(prediccion_stacking_B12))
+colnames(factor_stacking_B12)[colnames(factor_stacking_B12)=="as.factor(prediccion_stacking"]<-"B12"
+
+# Finalmente realizamos el confusionMatrix
+cm_stacking_B12 <- confusionMatrix(factor_stacking_B12$`as.factor(prediccion_stacking_B12)`,test_boruta_B12$B12)
+cm_stacking_B12
+cm_stacking_B12$byClass[7]
+```
+
+## Stacking
+
+Los resultados anteriores no parecen mejorar significativamente el modelo. Para optimizarlo aún más nos serán de utilidad los paquetes caretEnsemble() y SuperLearner() de tal forma que podemos combinar las predicciones de los diferentes algoritmos utilizados anteriormente asignando un peso a cada uno, con el objetivo final de aumentar la precisión de nuestro modelo
+
+En primer lugar probaremos la librería caretEnsemble
+
+```{r}
+library(caretEnsemble)
+set.seed(230793)
+
+# En primer lugar definimos cuál va a ser nuestro método de validación cruzada y los modelos que vamos a entrenar
+ensemble_control_B12<-trainControl(method="repeatedcv",number=10,repeats=3,savePredictions = "final", index = createResample(training_smote_B12$B12, 15), summaryFunction=twoClassSummary, classProbs=TRUE)
+
+learners<-c("knn","svmRadial","rpart","ranger","nnet","xgbTree")
+
+# Posteriormente entrenamos estos modelos
+modelos_B12<-caretList(B12~., data=training_smote_B12, methodList=learners, trControl = ensemble_control_B12)
+
+# Podemos ver la correlación entre los resultados de los modelos
+modelCor(resamples(modelos_B12))
+
+# Combinamos los distintos modelos por stacking al que generamos un nuevo trainControl()
+stack_control_B12<-trainControl(method="repeatedcv",number=10,repeats=3,savePredictions = "final", summaryFunction=twoClassSummary, classProbs=TRUE)
+
+modelo_stack_B12<-caretStack(modelos_B12,method="rf",metric="ROC",trControl=stack_control_B12)
+
+prediccion_stacking_B12<-predict(modelo_stack_B12,test_boruta_B12[,-1])
+prediccion_stacking_B12_prob<-predict(modelo_stack_B12,test_boruta_B12[,-1],type="prob")
+prediccion_stacking_B12
+cm_ensemble_B12<-confusionMatrix(prediccion_stacking_B12,test_boruta_B12$B12)
+cm_ensemble_B12
+```
+
+Y luego comprobamos con SuperLearner. En primer lugar, separamos nuestros datos y convertimos la variable respuesta en numérico 0-1. En primer lugar, separamos nuestros datos y convertimos la variable respuesta en numérico 0-1
+
+```{r}
+library("SuperLearner")
+
+B12_training<-as.numeric(training_smote_B12[,1])-1
+B12_test<-as.numeric(test_boruta_B12[,1])-1
+
+vari_training_B12 <- data.frame(training_smote_B12[,2:ncol(training_smote_B12)])
+vari_test_B12 <- data.frame(test_boruta_B12[,2:ncol(training_smote_B12)])
+```
+
+El propio paquete realiza un ajuste de hiperparámetros de los distintos modelos, pero como los hemos calculado previamente podemos definir los que mayor rendimiento nos han dado en el entrenamiento para que realice el nuevo modelo con los mejores hiperparámetros. Para ello, mediante function() se modifican los hiperparámetros
+
+```{r}
+# kNN
+SL.knn.tuneB12 <- function(...){
+  # Los 3 puntos permiten modificar únicamentelos hiperparámetros de la función que nos interesen
+      SL.knn(..., k=knn_k_B12)
+}
+# SVM
+SL.svm.tuneB12 <- function(...){
+      SL.svm(..., sigma=svm_sigma_B12, C=svm_c_B12,kernel = "radial")
+}
+# Tree
+SL.rpart.tuneB12 <- function(...){
+      SL.knn(..., cp=tree_cp_B12)
+}
+# Random Forest
+SL.ranger.tuneB12 <- function(...){
+      SL.ranger(..., mtry=rf_mtry_B12,min.node.size=rf_node_B12,splitrule="extratrees")
+}
+# Red neuronal
+SL.nnet.tuneB12 <- function(...){
+      SL.nnet(..., decay=rn_decay_B12, size=rn_size_B12,MaxNWts=10000)
+}
+# eXtreme Gradient Boosting
+SL.xgboost.tuneB12 <- function(...){
+      SL.xgboost(...,nrounds=xgb_nrounds_B12,max_depth=xgb_maxdepth_B12,eta=xgb_eta_B12,gamma=xgb_gamma_B12, colsample_bytree=xgb_colsample_B12,min_child_weight=xgb_weight_B12,subsample=xgb_subsample_B12)
+}
+```
+
+Posteriormente entrenamos el modelo mediante la función SuperLearner() indicando los algoritmos modificados y tipo binomial ya que nuestra variable respuesta es bicategórica
+
+```{r}
+set.seed(230793)
+
+super_combinado_B12 <- SuperLearner(B12_training,vari_training_B12,family=binomial(),SL.library=list("SL.knn.tuneB12","SL.svm.tuneB12","SL.rpart.tuneB12","SL.ranger.tuneB12","SL.nnet.tuneB12","SL.xgboost.tuneB12"))
+```
+
+Observamos el % de importancia de cada algoritmo al modelo, habiendo algunos que son excluidos 
+
+```{r}
+super_combinado_B12
+```
+
+Finalmente, realizamos la predicción con nuestro conjunto test y lo representamos nuevamente en forma de confusionMatrix
+
+```{r}
+# onlySL para indicar que sólo entrenará con aquellos modelos que tengan algo de influencia
+predicciones_super_B12 <- predict.SuperLearner(super_combinado_B12,vari_training_B12,onlySL=TRUE)
+
+# Podemos ver qué grado de probabilidad que le da cada modelo a ser de tipo "Déficit"
+predicciones_super_todos_B12<-predicciones_super_B12$library.predict
+head(predicciones_super_todos_B12)
+
+# Tenemos que obtener la predicción combinada para cada observación
+prediccion_final_super_B12<-predicciones_super_B12$pred
+
+# Convertimos las probabilidades nuevamente en 0-1 y etiquetamos como déficit o normal
+prediccion_final_super_B12<-ifelse(predicciones_super_B12$pred>=0.5,1,0)
+prediccion_final_super_B12<-as.data.frame(prediccion_final_super_B12)
+prediccion_final_super_B12$V1<-factor(prediccion_final_super_B12$V1,levels = c(0,1),labels = c("Déficit", "Normal"))
+
+B12_test_lista<-as.data.frame(B12_test)
+B12_test_lista$B12_test<-factor(B12_test_lista$B12_test,levels = c(0,1),labels = c("Déficit", "Normal"))
+
+prediccion_final_super_B12
+
+cm_super_B12 <- confusionMatrix(prediccion_final_super_B12$V1,B12_test_lista$B12_test)
+cm_super_B12
+```
+
+## Boosting
+
+Otra opción es la combinación de varios modelos, donde se da más enfasis a las instancias que se clasifican incorrectamente y posteriormente se ajustan los pesos de los modelos en base a sus resultados. Un ejemplo con el que lo podemos realizar es mediante la librería adabag()
+
+```{r}
+library(adabag)
+# Definimos los modelos que vamos a utilizar
+lista_modelos_B12<-list(modelo_knn_B12,modelo_svmrad_B12,modelo_tree_B12,modelo_rf_B12,modelo_rn_B12,modelo_xgb_B12)
+
+# Entrenamos en base a esos modelos
+modelo_boosting_B12<-boosting(B12~.,training_smote_B12,boos=TRUE,model=lista_modelos_B12)
+
+# Como siempre, realizamos confusionMatrix sobre las nuevas predicciones
+boosting_predic_B12 <- predict(modelo_boosting_B12, test_boruta_B12[,-1],type="prob")
+cm_boosting_B12<-confusionMatrix(as.factor(boosting_predic_B12$class), test_boruta_B12$B12)
+cm_boosting_B12
+```
+
+# Transformación del modelo para su aplicación real 
+
+```{r}
+validacion_B12<-ifelse(prediccion_stacking_B12_prob<=0.25,"Normal",ifelse(prediccion_stacking_B12_prob>=0.75,"Déficit","No concluyente"))
+
+df_validacion_B12<-cbind(validacion_B12,as.data.frame(test_boruta_B12$B12))
+
+no_concluyentes_B12<-round(sum(df_validacion_B12$validacion_B12=="No concluyente") / nrow(df_validacion_B12)*100,2)
+print(paste("El porcentaje de observaciones no concluyentes es ",no_concluyentes_B12))
+
+filtrado_B12<-df_validacion_B12[df_validacion_B12$validacion_B12!="No concluyente",]
+
+VP_B12<-sum(filtrado_B12$validacion =="Déficit"& filtrado_B12$`test_boruta_B12$B12` =="Déficit")
+VN_B12<-sum(filtrado_B12$validacion =="Normal"& filtrado_B12$`test_boruta_B12$B12` =="Normal")
+FP_B12<-sum(filtrado_B12$validacion =="Déficit"& filtrado_B12$`test_boruta_B12$B12` =="Normal")
+FN_B12<-sum(filtrado_B12$validacion =="Normal"& filtrado_B12$`test_boruta_B12$B12` =="Déficit")
+
+Sensibilidad_B12<-round((VP_B12/(VP_B12+FN_B12)),2)
+Especificidad_B12<-round((VN_B12/(VN_B12+FP_B12)),2)
+
+print(paste("Con un % de no concluyentes de",no_concluyentes_B12, "se obtuvo una sensibilidad de",Sensibilidad_B12," y una especificidad de", Especificidad_B12,"y que permitió clasificar correctamente a",VP_B12+VN_B12,"pacientes"))
+```

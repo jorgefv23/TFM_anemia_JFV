@@ -1,0 +1,907 @@
+---
+title: "Untitled"
+author: "Jorge FV"
+date: "2023-06-18"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Importar conjunto de datos y tratamiento previo
+
+Abrimos la base de datos mediante la función read_excel del paquete readxl
+
+```{r}
+library(readxl)
+subset_Fe <- read_excel("subset_Fe_UOC_JFV.xlsx")
+```
+
+Mediante str realizamos un análisis exploratorio de los datos (por motivos estéticos ejemplificamos con las primeras 5 variables)
+
+```{r}
+nrow(subset_Fe)
+ncol(subset_Fe)
+str((subset_Fe)[,1:5])
+```
+
+Nos interesa que tanto nuestra variable respuesta, como la variable sexo, estén en forma de factor, no numérico
+
+```{r}
+subset_Fe$Fe<-factor(subset_Fe$Fe,levels = c(1,2),
+labels = c("Déficit", "Normal"))
+str(subset_Fe$Fe)
+```
+
+```{r}
+subset_Fe$Sexo <- ifelse(subset_Fe$Sexo == 1, "Hombre", "Mujer")
+subset_Fe$Sexo <- as.factor(subset_Fe$Sexo)
+str(subset_Fe$Sexo)
+```
+
+Comprobamos que no existan valores perdidos en nuestra base de datos. En nuestro caso sí hay, así que comprobamos en qué variable tenemos estos valores perdidos, obteniendo que existen algunos valores NA, principalmente asociados a eritroblastos y edad
+
+```{r}
+library(purrr)
+any(!complete.cases(subset_Fe))
+map_dbl(subset_Fe, .f = function(x){sum(is.na(x))})
+```
+
+Procedemos a eliminar las filas que incluyan los valores perdidos. Al ser pocas podemos eliminarlas ya que no tendrá gran influencia, de haber sido más hubiesemos procedido a estudiar la importancia de la variable y en caso necesario realizar imputación de los valores ausentes
+
+```{r}
+delete.na <- function(df, n=0) {
+ df[rowSums(is.na(df)) <= n,]
+}
+subset_Fe<-delete.na(subset_Fe)
+```
+
+# Análisis Exploratorio de los datos
+
+Respecto a la distribución de la variable respuesta como se puede observar tenemos datos muy desbalanceados en nuestra base de datos con una mayor proporción de pacientes normales y notablemente inFerior en déficit. Posteriormente trabajaremos con métodos de data augmentation o undersampling para corregir este desbalanceo de datos
+
+```{r}
+library(ggplot2)
+ggplot(data = subset_Fe, aes(x = Fe, y = after_stat(count), fill = Fe)) +
+  geom_bar() +
+  scale_fill_manual(values = c("chocolate4","chartreuse3"))+
+  labs(title = "Déficit Fe") +
+  theme_bw() +
+  theme(legend.position = "right")
+```
+
+Podemos observar mediante representación en boxplot como las variables se presentan en diferentes escalas (p.e. las plaquetas), por lo que tendremos que normalizar los datos
+
+```{r}
+boxplot(subset_Fe[,2:111], which="all", las=1, main="Distribución de variables", col="grey")
+```
+
+Podemos observar la distribución de cada variable respecto al déficit de Fe para ver si siguen una distribución normal y detectar posibles valores atípicos así como realizar inferencias sobre posibles variables que puedan estar más relacionadas con el déficit de Fe
+
+```{r}
+library(ggpubr)
+library(cowplot)
+
+# Se define una función para crear los gráficos de distribución
+distribucion_plot <- function(data, x_var, fill_var) {
+  plot1 <- ggplot(data = data, aes(x = !!sym(x_var), fill = !!sym(fill_var))) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("brown4","green")) +
+    geom_rug(aes(color = !!sym(fill_var)), alpha = 0.5) +
+    scale_color_manual(values = c("brown4","green")) +
+    theme_bw()
+
+  plot2 <- ggplot(data = data, aes(x = !!sym(fill_var), y = !!sym(x_var), color = !!sym(fill_var))) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(alpha = 0.3, width = 0.15) +
+    scale_color_manual(values = c("brown4","green")) +
+    theme_bw()
+
+  final_plot <- ggarrange(plot1, plot2, legend = "top")
+  final_plot <- annotate_figure(final_plot, top = text_grob(x_var, size = 15))
+  
+  return(final_plot)
+}
+
+multiplesplots <- function(data, fill_var) {
+  x_vars <- names(data)[!names(data) %in% fill_var]
+    plots <- map(x_vars, function(x_var) {
+    distribucion_plot(data, x_var, fill_var)
+  })
+  return(plots)
+}
+```
+
+A modo de ejemplo, únicamente representaré la Edad, para así no aumentar el coste computacional
+
+```{r}
+distribucion_Fe <- subset(subset_Fe, select = c("Fe","MNVMO"))
+graf_distribucion_Fe <- multiplesplots(distribucion_Fe, "Fe")
+graf_distribucion_Fe
+```
+
+Otra forma de comparar los grupos es mediante sus medias y desviaciones estándar con la función aggregate()
+
+```{r}
+medias_Fe <- aggregate(. ~ Fe, subset_Fe, function(x) c(mean = mean(x), sd = sd(x)))
+medias_Fe
+```
+
+Y comprobamos que existan diferencias estadísticamente significativas en las variables respecto a la de respuesta
+
+```{r}
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+
+# En primer lugar se crea un long subset con todos los valores menos la edad, que es la única variable no cuantitativa
+
+long_subset_Fe <- subset_Fe[,-3] %>%
+  pivot_longer(-Fe, names_to = "variables", values_to = "Valor")
+
+long_subset_Fe %>% sample_n(ncol(subset_Fe)-1)
+
+# Y se calcula el p-valor
+t_student_Fe <- long_subset_Fe %>%
+  group_by(variables) %>%
+  t_test(Valor ~ Fe) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance()
+
+t_student_Fe
+
+# Para visualizar mejor, seleccionamos aquellas 6 variables de menor p-valor
+ordenado_t_student_Fe<- t_student_Fe[order(t_student_Fe$p.adj),]
+head(ordenado_t_student_Fe[,1])
+```
+
+Respecto a nuestra variable cualitativa Sexo, vemos cómo se distribuyen los datos de la variable predictora Fe
+
+```{r}
+ggplot(data = subset_Fe, aes(x = Sexo, y = after_stat(count), fill = Fe)) +
+  geom_bar() +
+  scale_fill_manual(values = c("brown4","green")) +
+  labs(title = "Distribución") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Y en cuanto a proporciones los resultados son similares no existiendo diferencias muy significativas entre grupos por sexo
+
+```{r}
+prop.table(table(subset_Fe$Sexo, subset_Fe$Fe), margin = 1) %>% round(digits = 2)
+```
+
+# Preprocesado de los datos
+
+En este caso, al sólo tener una variable categórica (sexo), únicamente se realiza una categorización dummy. Todo ello para evitar "dummy variable trap" y que ambas tengan una colinealidad perFecta
+
+```{r}
+library(caret)
+dummy_Fe <- dummyVars(" ~ Sexo", data = subset_Fe, fullRank = T)
+dummy_sexo_Fe <- data.frame(predict(dummy_Fe, newdata = subset_Fe))
+subset_Fe$Sexo<-dummy_sexo_Fe
+```
+
+Comprobamos que no existan variables de varianza cero mediante la función nearZeroVar(). Esta proporciona información en forma de tabla acerca de freqRatio (proporción del valor más repetido respecto al segundo más repetido, nos interesa que sea lo más bajo posible) y percentUnique (porcentaje de valores únicos, cuanto más alto mejor). La propia función te indica que ninguna variable debería ser eliminada por presentar varianza cero
+
+```{r}
+nzv_Fe <- nearZeroVar(subset_Fe, saveMetrics= TRUE)
+nzv_Fe
+```
+
+Otro de los pasos fundamentales del preprocesado es la eliminación de variables altamente correlacionadas. Mediante la función findCorrelation(), también del paquete caret, podemos hallar aquellas con una alta correlación (en este caso establecemos un cut-off de 0.8)
+
+```{r}
+# Separamos la variable predictora para que no interfiera en la matriz de correlaciones
+Fe<-data.frame(subset_Fe$Fe)
+subset_corr_Fe<-subset_Fe[,-1]
+# Mediante función cor() obtenemos correlaciones entre las variables
+correlacion_Fe<-cor(subset_corr_Fe)
+# Podemos ver qué variables están relacionadas entre sí
+var_correlacionadas_Fe<-findCorrelation(correlacion_Fe,cutoff=0.8,verbose=TRUE)
+# Cuáles son las variables a eliminar
+findCorrelation(correlacion_Fe,cutoff=0.8,names=TRUE)
+# Y la posición del dataframe de estas variables
+var_correlacionadas_Fe
+```
+
+Eliminamos estas variables que no interesan
+
+```{r}
+elim_corr_Fe<-subset_corr_Fe[-var_correlacionadas_Fe]
+dim(elim_corr_Fe)
+```
+
+En el caso de combinaciones lineales de varias variables será util la función findLinearCombos, que en este caso no detecta ninguna variable a eliminar
+
+```{r}
+correlacion_lineal_Fe<-cor(elim_corr_Fe)
+findLinearCombos(correlacion_lineal_Fe)
+```
+
+Finalmente, volvemos a añadir la variable predictora, modificamos nombre de variables y dejamos listo el data.frame
+
+```{r}
+subset_Fe<-cbind(Fe,elim_corr_Fe)
+subset_Fe$Sexo<-as.numeric(unlist(subset_Fe$Sexo))
+colnames(subset_Fe)[colnames(subset_Fe)=="subset_Fe.Fe"]<-"Fe"
+colnames(subset_Fe)[colnames(subset_Fe)=="Sexo$Sexo.Mujer"]<-"Sexo"
+```
+
+Una vez eliminados los valores nulos, las variables con alta correlación y categorizado los factores, se procede a separar el data set en subconjuntos de training y test mediante la función createDataPartition
+
+```{r}
+# En primer lugar, aleatorizamos los datos
+set.seed(230793)
+library(dplyr)
+subset_Fe<- sample_n(subset_Fe,nrow(subset_Fe))
+```
+
+Separamos los datos en training y test
+
+```{r}
+# 80% datos serán para entrenamiento y 20% para test
+set.seed(230793)
+particion_Fe<-createDataPartition(y=subset_Fe$Fe,p=0.8,list=FALSE)
+training_Fe<-subset_Fe[particion_Fe,]
+test_Fe<-subset_Fe[-particion_Fe,]
+```
+
+Con el objetivo de normalizar los datos y evitar que los valores más elevados (como las plaquetas) influyan en el resto se realiza un escalado de los datos. Los datos de test se escalan con la media y sd de los datos de entrenamiento
+
+```{r}
+procesar_train_Fe<-preProcess(training_Fe, method=c("center","scale"))
+training_esc_Fe<-predict(procesar_train_Fe,training_Fe)
+test_esc_Fe<-predict(procesar_train_Fe,test_Fe)
+```
+
+# Influencia variables
+
+Vemos qué variables tienen más importancia sobre la variable Fe
+
+Pero antes de continuar, a fin de aumentar la eficiencia computacional y que el proceso sea más rápido, paralelizamos el proceso ya que hay funciones y algoritmos que pueden llegar a tardar hasta una hora
+
+Realizamos una selección de variables más relevantes respecto a la respuesta Fe mediante el paquete Boruta()
+
+```{r}
+set.seed(230793)
+library(Boruta)
+boruta_Fe <- Boruta(Fe ~ ., data=training_esc_Fe, doTrace=1)
+```
+
+Podemos comprobar cuáles confirma como variables importantes, cuáles elimina y cuáles son posiblemente importantes. Como podemos ver, selecciona la HCM como variable más relevante
+
+```{r}
+boruta_Fe$finalDecision
+# Seleccionamos aquellos atributos más importantes (incluído los tentatives)
+boruta_signif_Fe <- getSelectedAttributes(boruta_Fe, withTentative = TRUE)
+
+# Representamos gráficamente y vemos en color verde aquellas que confirma como relevantes, en amarillo las posibles y en rojo las que descarta
+plot(boruta_Fe, cex.axis=.5, las=2, xlab="", main="Importancia de las variables")
+```
+
+Eliminamos las variables no relevantes de training y test para poder trabajar posteriormente con ellas
+
+```{r}
+training_boruta_Fe<-training_esc_Fe[,boruta_signif_Fe]
+training_boruta_Fe<-cbind(training_esc_Fe$Fe,training_boruta_Fe)
+colnames(training_boruta_Fe)[colnames(training_boruta_Fe)=="training_esc_Fe$Fe"]<-"Fe"
+
+test_boruta_Fe<-test_esc_Fe[,boruta_signif_Fe]
+test_boruta_Fe<-cbind(test_esc_Fe$Fe,test_boruta_Fe)
+colnames(test_boruta_Fe)[colnames(test_boruta_Fe)=="test_esc_Fe$Fe"]<-"Fe"
+```
+
+Una alternativa a Boruta para la selección de características cuando tenemos muchas y estas pueden influenciar en el modelo (overfitting) es mediante la librería glmnet() una regularización Lasso 
+
+```{r}
+set.seed(230793)
+library(glmnet)
+# Separamos variable respuesta de resto
+y <- training_esc_Fe$Fe
+x<- data.matrix(training_esc_Fe[,-1])
+
+# Seleccionamos alpha=1, de lo contrario si fuera 0 sería una regularización Ridge
+cv_model_Fe <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+plot(cv_model_Fe) 
+cv_model_Fe
+```
+
+Se representa gráficamente la varianza
+
+```{r}
+plot(cv_model_Fe$glmnet.fit,"lambda", label=FALSE)
+
+mejor_lambda_Fe <- cv_model_Fe$lambda.min
+mejor_modelo_Fe <- glmnet(x, y, alpha = 1, lambda = mejor_lambda_Fe,family = "binomial")
+```
+
+Finalmente, con la función coef() podemos ver qué aporta cada variable, observando  la CHCM como parámetro principal
+
+```{r}
+coeficientes_Fe<-coef(mejor_modelo_Fe)
+coeficientes_Fe
+```
+
+Volvemos a unir la variable respuesta con el resto de variable una vez eliminadas aquellas con varianza 0
+
+```{r}
+df_coeficientes_Fe <- as.data.frame(x[, coeficientes_Fe@i[-1]])
+training_lasso_Fe<-as.data.frame(cbind(y, df_coeficientes_Fe))
+colnames(training_lasso_Fe)[colnames(training_lasso_Fe)=="y"]<-"Fe"
+
+# Y realizamos lo mismo con el conjunto test, eliminando aquellas variables innecesarias
+w <- test_esc_Fe$Fe
+z<- data.matrix(test_esc_Fe[,-1])
+test_coeficientes_Fe <- as.data.frame(z[, coeficientes_Fe@i[-1]])
+test_lasso_Fe<-as.data.frame(cbind(w, test_coeficientes_Fe))
+colnames(test_lasso_Fe)[colnames(test_lasso_Fe)=="w"]<-"Fe"
+```
+
+Otra alternativa disponible en el preprocesado de datos para selección de variables o, en este caso, reducción de la dimensionalidad, será un análisis de componentes principales de tal forma podamos seguir eliminando más variables redundantes
+
+```{r}
+# No es necesario escalar ya que ya lo hemos realizado previamente por eso indicamos scale=FALSE
+pre_pca_Fe = prcomp(training_esc_Fe[,-1], scale=FALSE)
+head(pre_pca_Fe$rotation[,1:5])
+```
+
+```{r}
+# Realizando summary() podemos ver la varianza aportada por cada componente principal
+summary(pre_pca_Fe)
+# Comparamos PC1 y PC2. A priori no hay diferencias llamativas
+library(factoextra)
+fviz_pca_ind(pre_pca_Fe, geom.ind = "point",col.ind = "gray", axes = c(1, 2),pointsize = 1.5,habillage = training_esc_Fe$Fe)
+```
+
+Mediante la función get_pca_var podemos comprobar los loadings que explican los coeficientes de contribución de las variables en cada componente principal. A ejemplo mostraremos la contribución de las primeras 5 variables y la variable de mayor contribución en el primer componente
+
+```{r}
+var_Fe <- get_pca_var(pre_pca_Fe)
+head(var_Fe$contrib[,1:5])
+which.max(var_Fe$contrib[,1])
+```
+
+Que queda mejor reflejado gráficamente mediante la función fviz_screeplot() de caret. Como ejemplo, se observa en el gráfico que para el componente principal 1 la variable SDAL2NE aporta la mayor variación
+
+```{r}
+fviz_contrib(pre_pca_Fe, choice = "var", axes = 1, top = 10)
+```
+
+Otro gráfico interesante es este en el que podemos ver como al aumentar el número de componente principal la varianza explicada va disminuyendo
+
+```{r}
+library(psych)
+covarianza_Fe<-cov(training_esc_Fe[,-1])
+eigenvalues_Fe <- eigen(covarianza_Fe)$values
+plot(eigenvalues_Fe/tr(covarianza_Fe), xlab = "Componente Principal", ylab = "Proporción de varianza explicada", type = "b") 
+```
+
+O en el acumulado
+
+```{r}
+varianza_Fe<-100*pre_pca_Fe$sdev^2/sum(pre_pca_Fe$sdev^2)
+acumulado_Fe<-cumsum(varianza_Fe)
+plot(acumulado_Fe)
+```
+
+Este análisis de componentes principales también puede realizarse mediante caret con la función preProcess y method=PCA, seleccionando en thresh el valor 95% que es el que queremos explicar. Dejaré el código anterior sobre función prcomp ya que me ha servido para entender mejor el concepto de PCA
+
+```{r}
+pca_caret_train_Fe<- preProcess(training_esc_Fe, method = "pca", thresh = 0.95, scale=FALSE, center=FALSE)
+# Como podemos ver, emplea mismo número de componentes principales para explicar varianza 
+training_pca_Fe<-predict(pca_caret_train_Fe,training_esc_Fe)
+length(training_pca_Fe)
+# Convertimos también el grupo test mediante la misma transformación que la realizada al grupo train
+test_pca_Fe<-predict(pca_caret_train_Fe,test_esc_Fe)
+pca_caret_train_Fe
+```
+
+# Datos desbalanceados
+
+Como nuestros datos están desbalanceados vamos a aplicar técnicas de oversampling para conseguir que ambas clases se igualen. Una opción es SMOTE que se puede realizar mediante la librería performanceEstimation, con lo se generarán instancias sintéticas para sobremuestrear la clase minoritaria
+
+```{r}
+set.seed(230793)
+# Mediante la librería performanceEstimation con perc.over definimos la proporción de clase minoritaria que se generará, y mediante perc.under se realiza submuestreo de la clase mayoritaria
+library(performanceEstimation)
+training_smote_Fe<-smote(Fe~., training_boruta_Fe, perc.over=1.5, k=5, perc.under=2)
+training_smote_Fe<- sample_n(training_smote_Fe,nrow(training_smote_Fe))
+
+# Comprobamos que tras realizar SMOTE los datos se balancean obteniendo similar proporción de clase minoritaria y mayoritaria
+table(training_smote_Fe$Fe)
+```
+
+# Entrenamiento del modelo
+
+Seguiré trabajando con caret debido al gran número de funciones y algoritmos disponibles así como la abundante bibliografía existente. Veamos la cantidad de algoritmos disponibles dentro este paquete
+
+```{r}
+names(getModelInfo())
+```
+
+## kNN
+
+```{r}
+# Vemos qué parámetros podemos modificar
+modelLookup('knn')
+```
+
+```{r}
+set.seed(230793)
+
+# Mediante trainControl seleccionaremos el valor de k más adecuado con validación cruzada en 10 partes y 5 repeticiones, sin que nos muestre el proceso y permitiendo el paralelismo para aumentar la velocidad del procesado
+control_knn <- trainControl(method = "repeatedcv",repeats = 5,number = 10, verboseIter = FALSE,allowParallel = TRUE,classProbs=TRUE)
+
+# Y definimos el grid de hiperparámetros a probar (k), de 1 a 100
+hiperparametros_knn<-expand.grid(k = seq(1, 100, 2)) 
+
+modelo_knn_Fe <- train(Fe ~ ., method = "knn", data = training_smote_Fe,trControl=control_knn,tuneGrid=hiperparametros_knn, metric = "Accuracy")
+
+# Representamos el accuracy para cada valor de k y plot representativo
+modelo_knn_Fe
+plot(modelo_knn_Fe)
+```
+
+Seleccionamos el mejor hiperparámetro ya que posteriormente lo emplearé en la optimización del modelo
+
+```{r}
+knn_k_Fe<-modelo_knn$bestTune[,1]
+```
+
+```{r}
+# Función predict para que prediga los resultados ya en el conjunto de test (al que eliminamos la variable respuesta)
+knn_predic_Fe <- predict(modelo_knn_Fe, test_boruta_Fe[,-1])
+# Para la evaluación, será de utilidad la función confusionMatrix()
+cm_knn_Fe<-confusionMatrix(knn_predic_Fe, test_boruta_Fe$Fe)
+cm_knn_Fe
+```
+
+## SVM
+
+Comenzaremos con el modelo linear y seleccionando en los hiperparámetros los valores de cost
+
+```{r}
+modelLookup('svmLinear')
+```
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+# Elegimos el hiperparámetro a estudio probando con distintos cost
+hiperparametros_linear <- expand.grid(C = c(0.01,0.1,1,10,50))
+
+control_svm <- trainControl(method = "repeatedcv", number = 10, repeats=3, verboseIter = FALSE, allowParallel = TRUE, classProbs = TRUE)
+
+# Entrenamos el modelo
+
+modelo_svmlin_Fe <- train(Fe ~ ., data = training_smote_Fe,method = "svmLinear",tuneGrid = hiperparametros_linear,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmlin_Fe
+plot(modelo_svmlin_Fe)
+```
+
+```{r}
+set.seed(230793)
+svm_linear_predic_Fe <- predict(modelo_svmlin_Fe, test_boruta_Fe[,-1])
+cm_svm_linear_Fe<-confusionMatrix(svm_linear_predic_Fe, test_boruta_Fe$Fe)
+cm_svm_linear_Fe
+```
+
+Probamos posteriormente con el modelo radial
+
+```{r}
+modelLookup('svmRadial')
+```
+
+En este caso también debemos seleccionar el hiperparámetro sigma, que especifica el ancho de la función de base radial, por lo que se modifica el tunegrid
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_radial <- expand.grid(sigma=c(0.001,0.01,0.1,1), C = c(0.1,10,50))
+
+modelo_svmrad_Fe <- train(Fe ~ ., data = training_smote_Fe,method = "svmRadial",tuneGrid = hiperparametros_radial,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmrad_Fe
+plot(modelo_svmrad_Fe)
+```
+
+```{r}
+svm_radial_predic_Fe <- predict(modelo_svmrad_Fe, test_boruta_Fe[,-1])
+cm_svm_radial_Fe<-confusionMatrix(svm_radial_predic_Fe, test_boruta_Fe$Fe)
+cm_svm_radial_Fe
+```
+
+Y finalmente comprobaremos el algoritmo con kernel polinómico
+
+```{r}
+modelLookup('svmPoly')
+```
+
+Aquí se debe seleccionar los hiperparámetros degree, scale y C, por lo que se vuelve a modificar el tunegrid
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_poly <- expand.grid(degree=c(2,3,4), scale=c(0.01,0.1,1), C = c(0.01,0.1,10,50))
+
+modelo_svmpoly_Fe <- train(Fe ~ ., data = training_smote_Fe,method = "svmPoly",tuneGrid = hiperparametros_poly,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmpoly_Fe
+plot(modelo_svmpoly_Fe)
+```
+
+```{r}
+svm_poly_predic_Fe <- predict(modelo_svmpoly_Fe, test_boruta_Fe[,-1])
+cm_svm_poly_Fe<-confusionMatrix(svm_poly_predic_Fe, test_boruta_Fe$Fe)
+cm_svm_poly_Fe
+```
+
+El mejor modelo ha sido el de kernel radial por lo que nos interesa guardar sus hiperparámetros:
+
+```{r}
+svm_sigma_Fe<-modelo_svmrad_Fe$bestTune[,1]
+svm_c_Fe<-modelo_svmrad_Fe$bestTune[,2]
+```
+
+## Tree
+
+Este algoritmo tiene de hiperparámetro "cp" que representa la complejidad del árbol
+
+```{r}
+modelLookup('rpart')
+```
+
+```{r}
+set.seed(230793)
+
+hiperparametros_tree<-expand.grid(cp = c(0.001,0.1,0.5,1))
+
+control_tree <- trainControl(method = "repeatedcv", number=10,repeats= 5,verboseIter = FALSE, allowParallel = FALSE, classProbs=TRUE)
+
+modelo_tree_Fe <- train(Fe ~ ., data = training_smote_Fe, method = "rpart",metric = "Accuracy",tuneGrid=hiperparametros_tree,trControl = control_tree, maxdepth=2)
+
+modelo_tree_Fe
+plot(modelo_tree_Fe)
+```
+
+```{r}
+tree_predic_Fe <- predict(modelo_tree_Fe, test_boruta_Fe[,-1])
+cm_tree_Fe<-confusionMatrix(tree_predic_Fe, test_boruta_Fe$Fe)
+cm_tree_Fe
+```
+
+```{r}
+tree_cp_Fe<-modelo_tree_Fe$bestTune[,1]
+```
+
+## Random Forest
+
+```{r}
+modelLookup('ranger')
+```
+
+Modificamos en este caso los hiperparámetros mtry, min.node.size y splitrule
+
+```{r, cache=TRUE}
+set.seed(230793)
+hiperparametros_rf<-expand.grid(mtry =c(3,5,7,10,15),min.node.size=c(2,4,6),splitrule=c("gini","extratrees"))
+
+control_rf <- trainControl(method = "repeatedcv", number = 5, repeats=3, verboseIter = FALSE, allowParallel = FALSE, classProbs = TRUE)
+
+modelo_rf_Fe <- train(Fe ~ ., data = training_smote_Fe,method = "ranger",tuneGrid = hiperparametros_rf,metric = "Accuracy",trControl = control_rf,num.trees=500)
+
+modelo_rf_Fe
+plot(modelo_rf_Fe)
+```
+
+```{r}
+rf_predic_Fe <- predict(modelo_rf_Fe, test_boruta_Fe[,-1])
+cm_rf_Fe<- confusionMatrix(rf_predic_Fe, test_boruta_Fe$Fe)
+cm_rf_Fe
+```
+
+Nuevamente, seleccionamos los parámetros elegidos en el entrenamiento para posterior optimización
+
+```{r}
+rf_mtry_Fe<-modelo_rf_Fe$bestTune[,1]
+rf_splitrule_Fe<-modelo_rf_Fe$bestTune[,2]
+rf_node_Fe<-modelo_rf_Fe$bestTune[,3]
+```
+
+## Redes neuronales
+
+```{r}
+modelLookup('nnet')
+```
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_rn <- expand.grid(size = c(5,10,20,50),decay = c(0.001,0.01,0.1,1))
+
+control_rn <- trainControl(method = "repeatedcv", number = 3, verboseIter = FALSE, allowParallel = FALSE, classProbs = TRUE)
+
+# En este modelo tenemos que que ajustar el número máximo de iteraciones permitidas en la red neuronal MaxNWts, y seleccionamos trace=FALSE para que no nos muestre el proceso 
+
+modelo_rn_Fe <- train(Fe ~ ., data = training_smote_Fe,method = "nnet", tuneGrid = hiperparametros_rn,metric = "Accuracy",trControl = control_rn,trace=FALSE,MaxNWts = 10000)
+
+modelo_rn_Fe
+plot(modelo_rn_Fe)
+```
+
+```{r}
+rn_predic_Fe <- predict(modelo_rn_Fe, test_boruta_Fe[,-1])
+cm_rn_Fe<-confusionMatrix(rn_predic_Fe, test_boruta_Fe$Fe)
+```
+
+```{r}
+rn_size_Fe<-modelo_rn_Fe$bestTune[,1]
+rn_decay_Fe<-modelo_rn_Fe$bestTune[,2]
+```
+
+## eXtreme Gradient Boosting
+
+```{r}
+modelLookup('xgbTree')
+```
+
+```{r, cache=TRUE}
+hiperparametros_xgb <- expand.grid(nrounds = c(20,50,70),max_depth = c(7,15),eta = c(0.01,0.1,0.5),gamma=c(0.2,0.4),colsample_bytree=0.8,min_child_weight=c(1,3),subsample=0.8)
+
+control_train <- trainControl(method = "repeatedcv", number = 10,repeats = 3,returnResamp = "final", verboseIter = FALSE,allowParallel = TRUE, classProbs = TRUE)
+
+modelo_xgb_Fe <- train(Fe ~ ., data = training_smote_Fe, method = "xgbTree",tuneGrid = hiperparametros_xgb,metric = "Accuracy", iteration_range=100,trControl = control_train,verbose = FALSE, verbosity=0)
+
+modelo_xgb_Fe
+plot(modelo_xgb_Fe)
+```
+
+```{r}
+xgb_predic_Fe <- predict(modelo_xgb_Fe, test_boruta_Fe[,-1])
+cm_xgb_Fe<-confusionMatrix(xgb_predic_Fe, test_boruta_Fe$Fe)
+cm_xgb_Fe
+```
+
+```{r}
+xgb_nrounds_Fe<-modelo_xgb_Fe$bestTune[,1]
+xgb_maxdepth_Fe<-modelo_xgb_Fe$bestTune[,2]
+xgb_eta_Fe<-modelo_xgb_Fe$bestTune[,3]
+xgb_gamma_Fe<-modelo_xgb_Fe$bestTune[,4]
+xgb_colsample_Fe<-modelo_xgb_Fe$bestTune[,5]
+xgb_weight_Fe<-modelo_xgb_Fe$bestTune[,6]
+xgb_subsample_Fe<-modelo_xgb_Fe$bestTune[,7]
+```
+
+# Evaluación de los distintos modelos
+
+Comparamos el accuracy de todos nuestros confusionMatrix para evaluar los distintos modelos
+
+```{r}
+modelo_Fe<-c("knn","svmlin","svmradial","svmpoly","tree","rf","rn","xgb")
+
+F1_Fe<-c(cm_knn_Fe$byClass[7],cm_svm_linear_Fe$byClass[7],cm_svm_radial_Fe$byClass[7],cm_svm_poly_Fe$byClass[7],cm_tree_Fe$byClass[7],cm_rf_Fe$byClass[7],cm_rn_Fe$byClass[7],cm_xgb_Fe$byClass[7])
+
+accuracy_Fe<- c(cm_knn_Fe$overall[1],cm_svm_linear_Fe$overall[1],cm_svm_radial_Fe$overall[1],cm_svm_poly_Fe$overall[1],cm_tree_Fe$overall[1],cm_rf_Fe$overall[1],cm_rn_Fe$overall[1],cm_xgb_Fe$overall[1])
+
+kappa_Fe<-c(cm_knn_Fe$overall[2],cm_svm_linear_Fe$overall[2],cm_svm_radial_Fe$overall[2],cm_svm_poly_Fe$overall[2],cm_tree_Fe$overall[2],cm_rf_Fe$overall[2],cm_rn_Fe$overall[2],cm_xgb_Fe$overall[2])
+
+evaluacion_Fe<-data.frame(modelo_Fe,F1_Fe,accuracy_Fe,kappa_Fe)
+evaluacion_Fe
+```
+
+Representamos gráficamente comparando el accuracy entre los distintos modelos 
+
+```{r}
+df_plot_Fe<-cbind(as.data.frame(modelo_Fe),as.data.frame(accuracy_Fe),as.data.frame(kappa_Fe))
+
+library(ggplot2)
+ggplot(df_plot_Fe, aes(x=modelo,y=F1_Fe))+
+  geom_bar(stat="identity", fill="cornsilk3")+
+  geom_text(aes(label=paste(round(kappa,2),sep="")),color="red",vjust=-1,size=2)+
+  geom_point(aes(y=kappa),shape="*", color="red",size=5)+
+  labs(x="Modelo",y="F1-score",title="Comparación entre modelos")+
+  theme(axis.text.x=element_text(angle=45,hjust=1))+
+  theme(panel.grid=element_blank())
+```
+
+# Optimización del modelo
+
+## Voting
+
+Una opción posible para intentar mejorar las predicciones de los distintos algoritmos es juntar las decisiones para cada observación de cada uno de ellos y elegir la mayoritaria. En este caso, descartamos el algoritmo Tree ya que parece tener una menor precisión en comparación con el resto y puede aFectar negativamente a los resultados y los algoritmos svm con kernel linear y polinómico ya que las observaciones son muy similares
+
+```{r}
+# En primer lugar convertimos todas las predicciones obtenidas en data.frame, para posteriormente unirlas mediante cbind()
+
+df_knn_predic_Fe<-as.data.frame(svm_linear_predic_Fe)
+df_svm_linear_predic_Fe<-as.data.frame(svm_linear_predic_Fe)
+df_svm_radial_predic_Fe<-as.data.frame(svm_radial_predic_Fe)
+df_rf_predic_Fe<-as.data.frame(rf_predic_Fe)
+df_rn_predic_Fe<-as.data.frame(rn_predic_Fe)
+df_xgb_predic_Fe<-as.data.frame(xgb_predic_Fe)
+
+df_stacking_Fe<-cbind(df_knn_predic_Fe,df_svm_radial_predic_Fe,df_rf_predic_Fe,df_rn_predic_Fe,df_xgb_predic_Fe)
+
+# Ejemplo de las predicciones de cada algoritmo para las 5 primeras observaciones
+head(df_stacking_Fe)
+
+# Generamos una función en la que obtengamos el valor más repetido de cada fila, y en caso de empate, lo asigne aleatoriamente
+prediccion_stacking_Fe <- apply(df_stacking_Fe, 1, function(row) {
+  tab <- table(row)  
+  nombres <- names(tab)  
+  max_frecuencia <- max(tab)  
+  resultado <- nombres[tab == max_frecuencia] 
+  return(resultado)
+})
+# Ejemplo de las 5 primeras observaciones
+head(prediccion_stacking_Fe)
+
+# Pasamos a factor para poder comparar las predicciones con su valor real
+factor_stacking_Fe<-as.data.frame(as.factor(prediccion_stacking_Fe))
+colnames(factor_stacking_Fe)[colnames(factor_stacking_Fe)=="as.factor(prediccion_stacking"]<-"Fe"
+
+# Finalmente realizamos el confusionMatrix
+cm_stacking_Fe <- confusionMatrix(factor_stacking_Fe$`as.factor(prediccion_stacking_Fe)`,test_boruta_Fe$Fe)
+cm_stacking_Fe
+cm_stacking_Fe$byClass[7]
+```
+
+## Stacking
+
+Los resultados anteriores no parecen mejorar significativamente el modelo. Para optimizarlo aún más nos serán de utilidad los paquetes caretEnsemble() y SuperLearner() de tal forma que podemos combinar las predicciones de los diferentes algoritmos utilizados anteriormente asignando un peso a cada uno, con el objetivo final de aumentar la precisión de nuestro modelo
+
+En primer lugar probaremos la librería caretEnsemble
+
+```{r}
+library(caretEnsemble)
+set.seed(230793)
+
+# En primer lugar definimos cuál va a ser nuestro método de validación cruzada y los modelos que vamos a entrenar
+ensemble_control_Fe<-trainControl(method="repeatedcv",number=10,repeats=3,savePredictions = "final", index = createResample(training_smote_Fe$Fe, 15), summaryFunction=twoClassSummary, classProbs=TRUE)
+
+learners<-c("knn","svmRadial","rpart","ranger","nnet","xgbTree")
+
+# Posteriormente entrenamos estos modelos
+modelos_Fe<-caretList(Fe~., data=training_smote_Fe, methodList=learners, trControl = ensemble_control_Fe)
+
+# Podemos ver la correlación entre los resultados de los modelos
+modelCor(resamples(modelos_Fe))
+
+# Combinamos los distintos modelos por stacking al que generamos un nuevo trainControl()
+stack_control_Fe<-trainControl(method="repeatedcv",number=10,repeats=3,savePredictions = "final", summaryFunction=twoClassSummary, classProbs=TRUE)
+
+modelo_stack_Fe<-caretStack(modelos_Fe,method="rf",metric="ROC",trControl=stack_control_Fe)
+
+prediccion_stacking_Fe<-predict(modelo_stack_Fe,test_boruta_Fe[,-1])
+prediccion_stacking_Fe_prob<-predict(modelo_stack_Fe,test_boruta_Fe[,-1],type="prob")
+cm_ensemble_Fe<-confusionMatrix(prediccion_stacking_Fe,test_boruta_Fe$Fe)
+cm_ensemble_Fe
+```
+
+Y luego comprobamos con SuperLearner. En primer lugar, separamos nuestros datos y convertimos la variable respuesta en numérico 0-1. En primer lugar, separamos nuestros datos y convertimos la variable respuesta en numérico 0-1
+
+```{r}
+library("SuperLearner")
+
+Fe_training<-as.numeric(training_smote_Fe[,1])-1
+Fe_test<-as.numeric(test_boruta_Fe[,1])-1
+
+vari_training_Fe <- data.frame(training_smote_Fe[,2:ncol(training_smote_Fe)])
+vari_test_Fe <- data.frame(test_boruta_Fe[,2:ncol(training_smote_Fe)])
+```
+
+El propio paquete realiza un ajuste de hiperparámetros de los distintos modelos, pero como los hemos calculado previamente podemos definir los que mayor rendimiento nos han dado en el entrenamiento para que realice el nuevo modelo con los mejores hiperparámetros. Para ello, mediante function() se modifican los hiperparámetros
+
+```{r}
+# kNN
+SL.knn.tuneFe <- function(...){
+  # Los 3 puntos permiten modificar únicamentelos hiperparámetros de la función que nos interesen
+      SL.knn(..., k=knn_k_Fe)
+}
+# SVM
+SL.svm.tuneFe <- function(...){
+      SL.svm(..., sigma=svm_sigma_Fe, C=svm_c_Fe,kernel = "radial")
+}
+# Tree
+SL.rpart.tuneFe <- function(...){
+      SL.knn(..., cp=tree_cp_Fe)
+}
+# Random Forest
+SL.ranger.tuneFe <- function(...){
+      SL.ranger(..., mtry=rf_mtry_Fe,min.node.size=rf_node_Fe,splitrule="extratrees")
+}
+# Red neuronal
+SL.nnet.tuneFe <- function(...){
+      SL.nnet(..., decay=rn_decay_Fe, size=rn_size_Fe,MaxNWts=10000)
+}
+# eXtreme Gradient Boosting
+SL.xgboost.tuneFe <- function(...){
+      SL.xgboost(...,nrounds=xgb_nrounds_Fe,max_depth=xgb_maxdepth_Fe,eta=xgb_eta_Fe,gamma=xgb_gamma_Fe, colsample_bytree=xgb_colsample_Fe,min_child_weight=xgb_weight_Fe,subsample=xgb_subsample_Fe)
+}
+```
+
+Posteriormente entrenamos el modelo mediante la función SuperLearner() indicando los algoritmos modificados y tipo binomial ya que nuestra variable respuesta es bicategórica
+
+```{r}
+set.seed(230793)
+
+super_combinado_Fe <- SuperLearner(Fe_training,vari_training_Fe,family=binomial(),SL.library=list("SL.knn.tuneFe","SL.svm.tuneFe","SL.rpart.tuneFe","SL.ranger.tuneFe","SL.nnet.tuneFe","SL.xgboost.tuneFe"))
+```
+
+Observamos el % de importancia de cada algoritmo al modelo, habiendo algunos que son excluidos 
+
+```{r}
+super_combinado_Fe
+```
+
+Finalmente, realizamos la predicción con nuestro conjunto test y lo representamos nuevamente en forma de confusionMatrix
+
+```{r}
+# onlySL para indicar que sólo entrenará con aquellos modelos que tengan algo de influencia
+predicciones_super_Fe <- predict.SuperLearner(super_combinado_Fe,vari_training_Fe,onlySL=TRUE)
+
+# Podemos ver qué grado de probabilidad que le da cada modelo a ser de tipo "Déficit"
+predicciones_super_todos_Fe<-predicciones_super_Fe$library.predict
+head(predicciones_super_todos_Fe)
+
+# Tenemos que obtener la predicción combinada para cada observación
+prediccion_final_super_Fe<-predicciones_super_Fe$pred
+
+# Convertimos las probabilidades nuevamente en 0-1 y etiquetamos como déficit o normal
+prediccion_final_super_Fe<-ifelse(predicciones_super_Fe$pred>=0.5,1,0)
+prediccion_final_super_Fe<-as.data.frame(prediccion_final_super_Fe)
+prediccion_final_super_Fe$V1<-factor(prediccion_final_super_Fe$V1,levels = c(0,1),labels = c("Déficit", "Normal"))
+
+Fe_test_lista<-as.data.frame(Fe_test)
+Fe_test_lista$Fe_test<-factor(Fe_test_lista$Fe_test,levels = c(0,1),labels = c("Déficit", "Normal"))
+
+prediccion_final_super_Fe
+
+cm_super_Fe <- confusionMatrix(prediccion_final_super_Fe$V1,Fe_test_lista$Fe_test)
+cm_super_Fe
+```
+
+## Boosting
+
+Otra opción es la combinación de varios modelos, donde se da más enfasis a las instancias que se clasifican incorrectamente y posteriormente se ajustan los pesos de los modelos en base a sus resultados. Un ejemplo con el que lo podemos realizar es mediante la librería adabag()
+
+```{r}
+library(adabag)
+# Definimos los modelos que vamos a utilizar
+lista_modelos_Fe<-list(modelo_knn_Fe,modelo_svmrad_Fe,modelo_tree_Fe,modelo_rf_Fe,modelo_rn_Fe,modelo_xgb_Fe)
+
+# Entrenamos en base a esos modelos
+modelo_boosting_Fe<-boosting(Fe~.,training_smote_Fe,boos=TRUE,model=lista_modelos_Fe)
+
+# Como siempre, realizamos confusionMatrix sobre las nuevas predicciones
+boosting_predic_Fe <- predict(modelo_boosting_Fe, test_boruta_Fe[,-1],type="prob")
+cm_boosting_Fe<-confusionMatrix(as.factor(boosting_predic_Fe$class), test_boruta_Fe$Fe)
+cm_boosting_Fe
+```
+
+# Transformación del modelo para su aplicación real 
+
+```{r}
+validacion_Fe<-ifelse(prediccion_stacking_Fe_prob<=0.1,"Normal",ifelse(prediccion_stacking_Fe_prob>=0.9,"Déficit","No concluyente"))
+
+df_validacion_Fe<-cbind(validacion_Fe,as.data.frame(test_boruta_Fe$Fe))
+
+no_concluyentes_Fe<-round(sum(df_validacion_Fe$validacion_Fe=="No concluyente") / nrow(df_validacion_Fe)*100,2)
+print(paste("El porcentaje de observaciones no concluyentes es ",no_concluyentes_Fe))
+
+filtrado_Fe<-df_validacion_Fe[df_validacion_Fe$validacion_Fe!="No concluyente",]
+
+VP_Fe<-sum(filtrado_Fe$validacion =="Déficit"& filtrado_Fe$`test_boruta_Fe$Fe` =="Déficit")
+VN_Fe<-sum(filtrado_Fe$validacion =="Normal"& filtrado_Fe$`test_boruta_Fe$Fe` =="Normal")
+FP_Fe<-sum(filtrado_Fe$validacion =="Déficit"& filtrado_Fe$`test_boruta_Fe$Fe` =="Normal")
+FN_Fe<-sum(filtrado_Fe$validacion =="Normal"& filtrado_Fe$`test_boruta_Fe$Fe` =="Déficit")
+
+Sensibilidad_Fe<-round((VP_Fe/(VP_Fe+FN_Fe)),2)
+Especificidad_Fe<-round((VN_Fe/(VN_Fe+FP_Fe)),2)
+
+print(paste("Con un % de no concluyentes de",no_concluyentes_Fe, "se obtuvo una sensibilidad de",Sensibilidad_Fe," y una especificidad de", Especificidad_Fe,"y que permitió clasificar correctamente a",VP_Fe+VN_Fe,"pacientes"))
+```

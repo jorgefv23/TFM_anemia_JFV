@@ -1,0 +1,904 @@
+---
+title: "Anemia_Fol_UOC_JFV"
+author: "Jorge FV"
+date: "2023-06-01"
+output: html_document
+---
+
+# Importar conjunto de datos y tratamiento previo
+
+Abrimos la base de datos mediante la función read_excel del paquete readxl
+
+```{r}
+library(readxl)
+subset_Fol <- read_excel("subset_Fol_UOC_JFV.xlsx")
+```
+
+Mediante str realizamos un análisis exploratorio de los datos (por motivos estéticos ejemplificamos con las primeras 5 variables)
+
+```{r}
+nrow(subset_Fol)
+ncol(subset_Fol)
+str((subset_Fol)[,1:5])
+```
+
+Nos interesa que tanto nuestra variable respuesta, como la variable sexo, estén en forma de factor, no numérico
+
+```{r}
+subset_Fol$Fol<-factor(subset_Fol$Fol,levels = c(1,2),
+labels = c("Déficit", "Normal"))
+str(subset_Fol$Fol)
+```
+
+```{r}
+subset_Fol$Sexo <- ifelse(subset_Fol$Sexo == 1, "Hombre", "Mujer")
+subset_Fol$Sexo <- as.factor(subset_Fol$Sexo)
+str(subset_Fol$Sexo)
+```
+
+Comprobamos que no existan valores perdidos en nuestra base de datos. En nuestro caso sí hay, así que comprobamos en qué variable tenemos estos valores perdidos, obteniendo que existen algunos valores NA, principalmente asociados a eritroblastos y edad
+
+```{r}
+library(purrr)
+any(!complete.cases(subset_Fol))
+map_dbl(subset_Fol, .f = function(x){sum(is.na(x))})
+```
+
+Procedemos a eliminar las filas que incluyan los valores perdidos. Al ser pocas podemos eliminarlas ya que no tendrá gran influencia, de haber sido más hubiesemos procedido a estudiar la importancia de la variable y en caso necesario realizar imputación de los valores ausentes
+
+```{r}
+delete.na <- function(df, n=0) {
+ df[rowSums(is.na(df)) <= n,]
+}
+subset_Fol<-delete.na(subset_Fol)
+```
+
+# Análisis Exploratorio de los datos
+
+Respecto a la distribución de la variable respuesta como se puede observar tenemos datos muy desbalanceados en nuestra base de datos con una mayor proporción de pacientes normales y notablemente inFolrior en déficit. Posteriormente trabajaremos con métodos de data augmentation o undersampling para corregir este desbalanceo de datos
+
+```{r}
+library(ggplot2)
+ggplot(data = subset_Fol, aes(x = Fol, y = after_stat(count), fill = Fol)) +
+  geom_bar() +
+  scale_fill_manual(values = c("chocolate4","chartreuse3"))+
+  labs(title = "Déficit Fol") +
+  theme_bw() +
+  theme(legend.position = "right")
+```
+
+Podemos observar mediante representación en boxplot como las variables se presentan en diferentes escalas (p.e. las plaquetas), por lo que tendremos que normalizar los datos
+
+```{r}
+boxplot(subset_Fol[,2:111], which="all", las=1, main="Distribución de variables", col="grey")
+```
+
+Podemos observar la distribución de cada variable respecto al déficit de Fol para ver si siguen una distribución normal y detectar posibles valores atípicos así como realizar inferencias sobre posibles variables que puedan estar más relacionadas con el déficit de Fol
+
+```{r}
+library(ggpubr)
+library(cowplot)
+
+# Se define una función para crear los gráficos de distribución
+distribucion_plot <- function(data, x_var, fill_var) {
+  plot1 <- ggplot(data = data, aes(x = !!sym(x_var), fill = !!sym(fill_var))) +
+    geom_density(alpha = 0.5) +
+    scale_fill_manual(values = c("brown4","green")) +
+    geom_rug(aes(color = !!sym(fill_var)), alpha = 0.5) +
+    scale_color_manual(values = c("brown4","green")) +
+    theme_bw()
+
+  plot2 <- ggplot(data = data, aes(x = !!sym(fill_var), y = !!sym(x_var), color = !!sym(fill_var))) +
+    geom_boxplot(outlier.shape = NA) +
+    geom_jitter(alpha = 0.3, width = 0.15) +
+    scale_color_manual(values = c("brown4","green")) +
+    theme_bw()
+
+  final_plot <- ggarrange(plot1, plot2, legend = "top")
+  final_plot <- annotate_figure(final_plot, top = text_grob(x_var, size = 15))
+  
+  return(final_plot)
+}
+
+multiplesplots <- function(data, fill_var) {
+  x_vars <- names(data)[!names(data) %in% fill_var]
+    plots <- map(x_vars, function(x_var) {
+    distribucion_plot(data, x_var, fill_var)
+  })
+  return(plots)
+}
+```
+
+A modo de ejemplo, únicamente representaré la Edad, para así no aumentar el coste computacional
+
+```{r}
+distribucion_Fol <- subset(subset_Fol, select = c("Fol","MNVMO"))
+graf_distribucion_Fol <- multiplesplots(distribucion_Fol, "Fol")
+graf_distribucion_Fol
+```
+
+Otra forma de comparar los grupos es mediante sus medias y desviaciones estándar con la función aggregate()
+
+```{r}
+medias_Fol <- aggregate(. ~ Fol, subset_Fol, function(x) c(mean = mean(x), sd = sd(x)))
+medias_Fol
+```
+
+Y comprobamos que existan diferencias estadísticamente significativas en las variables respecto a la de respuesta
+
+```{r}
+library(tidyverse)
+library(rstatix)
+library(ggpubr)
+
+# En primer lugar se crea un long subset con todos los valores menos la edad, que es la única variable no cuantitativa
+
+long_subset_Fol <- subset_Fol[,-3] %>%
+  pivot_longer(-Fol, names_to = "variables", values_to = "Valor")
+
+long_subset_Fol %>% sample_n(ncol(subset_Fol)-1)
+
+# Y se calcula el p-valor
+t_student_Fol <- long_subset_Fol %>%
+  group_by(variables) %>%
+  t_test(Valor ~ Fol) %>%
+  adjust_pvalue(method = "BH") %>%
+  add_significance()
+
+t_student_Fol
+
+# Para visualizar mejor, seleccionamos aquellas 6 variables de menor p-valor
+ordenado_t_student_Fol<- t_student_Fol[order(t_student_Fol$p.adj),]
+head(ordenado_t_student_Fol[,1])
+```
+
+Respecto a nuestra variable cualitativa Sexo, vemos cómo se distribuyen los datos de la variable predictora Fol
+
+```{r}
+ggplot(data = subset_Fol, aes(x = Sexo, y = after_stat(count), fill = Fol)) +
+  geom_bar() +
+  scale_fill_manual(values = c("brown4","green")) +
+  labs(title = "Distribución") +
+  theme_bw() +
+  theme(legend.position = "bottom")
+```
+
+Y en cuanto a proporciones los resultados son similares no existiendo diferencias muy significativas entre grupos por sexo
+
+```{r}
+prop.table(table(subset_Fol$Sexo, subset_Fol$Fol), margin = 1) %>% round(digits = 2)
+```
+
+# Preprocesado de los datos
+
+En este caso, al sólo tener una variable categórica (sexo), únicamente se realiza una categorización dummy. Todo ello para evitar "dummy variable trap" y que ambas tengan una colinealidad perFolcta
+
+```{r}
+library(caret)
+dummy_Fol <- dummyVars(" ~ Sexo", data = subset_Fol, fullRank = T)
+dummy_sexo_Fol <- data.frame(predict(dummy_Fol, newdata = subset_Fol))
+subset_Fol$Sexo<-dummy_sexo_Fol
+```
+
+Comprobamos que no existan variables de varianza cero mediante la función nearZeroVar(). Esta proporciona información en forma de tabla acerca de freqRatio (proporción del valor más repetido respecto al segundo más repetido, nos interesa que sea lo más bajo posible) y percentUnique (porcentaje de valores únicos, cuanto más alto mejor). La propia función te indica que ninguna variable debería ser eliminada por presentar varianza cero
+
+```{r}
+nzv_Fol <- nearZeroVar(subset_Fol, saveMetrics= TRUE)
+nzv_Fol
+```
+
+Otro de los pasos fundamentales del preprocesado es la eliminación de variables altamente correlacionadas. Mediante la función findCorrelation(), también del paquete caret, podemos hallar aquellas con una alta correlación (en este caso establecemos un cut-off de 0.8)
+
+```{r}
+# Separamos la variable predictora para que no interfiera en la matriz de correlaciones
+Fol<-data.frame(subset_Fol$Fol)
+subset_corr_Fol<-subset_Fol[,-1]
+# Mediante función cor() obtenemos correlaciones entre las variables
+correlacion_Fol<-cor(subset_corr_Fol)
+# Podemos ver qué variables están relacionadas entre sí
+var_correlacionadas_Fol<-findCorrelation(correlacion_Fol,cutoff=0.8,verbose=TRUE)
+# Cuáles son las variables a eliminar
+findCorrelation(correlacion_Fol,cutoff=0.8,names=TRUE)
+# Y la posición del dataframe de estas variables
+var_correlacionadas_Fol
+```
+
+Eliminamos estas variables que no interesan
+
+```{r}
+elim_corr_Fol<-subset_corr_Fol[-var_correlacionadas_Fol]
+dim(elim_corr_Fol)
+```
+
+En el caso de combinaciones lineales de varias variables será util la función findLinearCombos, que en este caso no detecta ninguna variable a eliminar
+
+```{r}
+correlacion_lineal_Fol<-cor(elim_corr_Fol)
+findLinearCombos(correlacion_lineal_Fol)
+```
+
+Finalmente, volvemos a añadir la variable predictora, modificamos nombre de variables y dejamos listo el data.frame
+
+```{r}
+subset_Fol<-cbind(Fol,elim_corr_Fol)
+subset_Fol$Sexo<-as.numeric(unlist(subset_Fol$Sexo))
+colnames(subset_Fol)[colnames(subset_Fol)=="subset_Fol.Fol"]<-"Fol"
+colnames(subset_Fol)[colnames(subset_Fol)=="Sexo$Sexo.Mujer"]<-"Sexo"
+```
+
+Una vez eliminados los valores nulos, las variables con alta correlación y categorizado los factores, se procede a separar el data set en subconjuntos de training y test mediante la función createDataPartition
+
+```{r}
+# En primer lugar, aleatorizamos los datos
+set.seed(230793)
+library(dplyr)
+subset_Fol<- sample_n(subset_Fol,nrow(subset_Fol))
+```
+
+Separamos los datos en training y test
+
+```{r}
+# 80% datos serán para entrenamiento y 20% para test
+set.seed(230793)
+particion_Fol<-createDataPartition(y=subset_Fol$Fol,p=0.8,list=FALSE)
+training_Fol<-subset_Fol[particion_Fol,]
+test_Fol<-subset_Fol[-particion_Fol,]
+```
+
+Con el objetivo de normalizar los datos y evitar que los valores más elevados (como las plaquetas) influyan en el resto se realiza un escalado de los datos. Los datos de test se escalan con la media y sd de los datos de entrenamiento
+
+```{r}
+procesar_train_Fol<-preProcess(training_Fol, method=c("center","scale"))
+training_esc_Fol<-predict(procesar_train_Fol,training_Fol)
+test_esc_Fol<-predict(procesar_train_Fol,test_Fol)
+```
+
+# Influencia variables
+
+Vemos qué variables tienen más importancia sobre la variable Fol
+
+Pero antes de continuar, a fin de aumentar la eficiencia computacional y que el proceso sea más rápido, paralelizamos el proceso ya que hay funciones y algoritmos que pueden llegar a tardar hasta una hora
+
+Realizamos una selección de variables más relevantes respecto a la respuesta Fol mediante el paquete Boruta()
+
+```{r}
+set.seed(230793)
+library(Boruta)
+boruta_Fol <- Boruta(Fol ~ ., data=training_esc_Fol, doTrace=1)
+```
+
+Podemos comprobar cuáles confirma como variables importantes, cuáles elimina y cuáles son posiblemente importantes. Como podemos ver, selecciona la HCM como variable más relevante
+
+```{r}
+boruta_Fol$finalDecision
+# Seleccionamos aquellos atributos más importantes (incluído los tentatives)
+boruta_signif_Fol <- getSelectedAttributes(boruta_Fol, withTentative = TRUE)
+
+# Representamos gráficamente y vemos en color verde aquellas que confirma como relevantes, en amarillo las posibles y en rojo las que descarta
+plot(boruta_Fol, cex.axis=.5, las=2, xlab="", main="Importancia de las variables")
+```
+
+Eliminamos las variables no relevantes de training y test para poder trabajar posteriormente con ellas
+
+```{r}
+training_boruta_Fol<-training_esc_Fol[,boruta_signif_Fol]
+training_boruta_Fol<-cbind(training_esc_Fol$Fol,training_boruta_Fol)
+colnames(training_boruta_Fol)[colnames(training_boruta_Fol)=="training_esc_Fol$Fol"]<-"Fol"
+
+test_boruta_Fol<-test_esc_Fol[,boruta_signif_Fol]
+test_boruta_Fol<-cbind(test_esc_Fol$Fol,test_boruta_Fol)
+colnames(test_boruta_Fol)[colnames(test_boruta_Fol)=="test_esc_Fol$Fol"]<-"Fol"
+```
+
+Una alternativa a Boruta para la selección de características cuando tenemos muchas y estas pueden influenciar en el modelo (overfitting) es mediante la librería glmnet() una regularización Lasso 
+
+```{r}
+set.seed(230793)
+library(glmnet)
+# Separamos variable respuesta de resto
+y <- training_esc_Fol$Fol
+x<- data.matrix(training_esc_Fol[,-1])
+
+# Seleccionamos alpha=1, de lo contrario si fuera 0 sería una regularización Ridge
+cv_model_Fol <- cv.glmnet(x, y, alpha = 1, family = "binomial")
+plot(cv_model_Fol) 
+cv_model_Fol
+```
+
+Se representa gráficamente la varianza
+
+```{r}
+plot(cv_model_Fol$glmnet.fit,"lambda", label=FALSE)
+
+mejor_lambda_Fol <- cv_model_Fol$lambda.min
+mejor_modelo_Fol <- glmnet(x, y, alpha = 1, lambda = mejor_lambda_Fol,family = "binomial")
+```
+
+Finalmente, con la función coef() podemos ver qué aporta cada variable, observando  la CHCM como parámetro principal
+
+```{r}
+coeficientes_Fol<-coef(mejor_modelo_Fol)
+coeficientes_Fol
+```
+
+Volvemos a unir la variable respuesta con el resto de variable una vez eliminadas aquellas con varianza 0
+
+```{r}
+df_coeficientes_Fol <- as.data.frame(x[, coeficientes_Fol@i[-1]])
+training_lasso_Fol<-as.data.frame(cbind(y, df_coeficientes_Fol))
+colnames(training_lasso_Fol)[colnames(training_lasso_Fol)=="y"]<-"Fol"
+
+# Y realizamos lo mismo con el conjunto test, eliminando aquellas variables innecesarias
+w <- test_esc_Fol$Fol
+z<- data.matrix(test_esc_Fol[,-1])
+test_coeficientes_Fol <- as.data.frame(z[, coeficientes_Fol@i[-1]])
+test_lasso_Fol<-as.data.frame(cbind(w, test_coeficientes_Fol))
+colnames(test_lasso_Fol)[colnames(test_lasso_Fol)=="w"]<-"Fol"
+```
+
+Otra alternativa disponible en el preprocesado de datos para selección de variables o, en este caso, reducción de la dimensionalidad, será un análisis de componentes principales de tal forma podamos seguir eliminando más variables redundantes
+
+```{r}
+# No es necesario escalar ya que ya lo hemos realizado previamente por eso indicamos scale=FALSE
+pre_pca_Fol = prcomp(training_esc_Fol[,-1], scale=FALSE)
+head(pre_pca_Fol$rotation[,1:5])
+```
+
+```{r}
+# Realizando summary() podemos ver la varianza aportada por cada componente principal
+summary(pre_pca_Fol)
+# Comparamos PC1 y PC2. A priori no hay diferencias llamativas
+library(factoextra)
+fviz_pca_ind(pre_pca_Fol, geom.ind = "point",col.ind = "gray", axes = c(1, 2),pointsize = 1.5,habillage = training_esc_Fol$Fol)
+```
+
+Mediante la función get_pca_var podemos comprobar los loadings que explican los coeficientes de contribución de las variables en cada componente principal. A ejemplo mostraremos la contribución de las primeras 5 variables y la variable de mayor contribución en el primer componente
+
+```{r}
+var_Fol <- get_pca_var(pre_pca_Fol)
+head(var_Fol$contrib[,1:5])
+which.max(var_Fol$contrib[,1])
+```
+
+Que queda mejor reflejado gráficamente mediante la función fviz_screeplot() de caret. Como ejemplo, se observa en el gráfico que para el componente principal 1 la variable SDAL2NE aporta la mayor variación
+
+```{r}
+fviz_contrib(pre_pca_Fol, choice = "var", axes = 1, top = 10)
+```
+
+Otro gráfico interesante es este en el que podemos ver como al aumentar el número de componente principal la varianza explicada va disminuyendo
+
+```{r}
+library(psych)
+covarianza_Fol<-cov(training_esc_Fol[,-1])
+eigenvalues_Fol <- eigen(covarianza_Fol)$values
+plot(eigenvalues_Fol/tr(covarianza_Fol), xlab = "Componente Principal", ylab = "Proporción de varianza explicada", type = "b") 
+```
+
+O en el acumulado
+
+```{r}
+varianza_Fol<-100*pre_pca_Fol$sdev^2/sum(pre_pca_Fol$sdev^2)
+acumulado_Fol<-cumsum(varianza_Fol)
+plot(acumulado_Fol)
+```
+
+Este análisis de componentes principales también puede realizarse mediante caret con la función preProcess y method=PCA, seleccionando en thresh el valor 95% que es el que queremos explicar. Dejaré el código anterior sobre función prcomp ya que me ha servido para entender mejor el concepto de PCA
+
+```{r}
+pca_caret_train_Fol<- preProcess(training_esc_Fol, method = "pca", thresh = 0.95, scale=FALSE, center=FALSE)
+# Como podemos ver, emplea mismo número de componentes principales para explicar varianza 
+training_pca_Fol<-predict(pca_caret_train_Fol,training_esc_Fol)
+length(training_pca_Fol)
+# Convertimos también el grupo test mediante la misma transformación que la realizada al grupo train
+test_pca_Fol<-predict(pca_caret_train_Fol,test_esc_Fol)
+pca_caret_train_Fol
+```
+
+# Datos desbalanceados
+
+Como nuestros datos están desbalanceados vamos a aplicar técnicas de oversampling para conseguir que ambas clases se igualen. Una opción es SMOTE que se puede realizar mediante la librería performanceEstimation, con lo se generarán instancias sintéticas para sobremuestrear la clase minoritaria
+
+```{r}
+set.seed(230793)
+# Mediante la librería performanceEstimation con perc.over definimos la proporción de clase minoritaria que se generará, y mediante perc.under se realiza submuestreo de la clase mayoritaria
+library(performanceEstimation)
+training_smote_Fol<-smote(Fol~., training_boruta_Fol, perc.over=3, k=3, perc.under=1.5)
+training_smote_Fol<- sample_n(training_smote_Fol,nrow(training_smote_Fol))
+
+# Comprobamos que tras realizar SMOTE los datos se balancean obteniendo similar proporción de clase minoritaria y mayoritaria
+table(training_smote_Fol$Fol)
+```
+
+# Entrenamiento del modelo
+
+Seguiré trabajando con caret debido al gran número de funciones y algoritmos disponibles así como la abundante bibliografía existente. Veamos la cantidad de algoritmos disponibles dentro este paquete
+
+```{r}
+names(getModelInfo())
+```
+
+## kNN
+
+```{r}
+# Vemos qué parámetros podemos modificar
+modelLookup('knn')
+```
+
+```{r}
+set.seed(230793)
+
+# Mediante trainControl seleccionaremos el valor de k más adecuado con validación cruzada en 10 partes y 5 repeticiones, sin que nos muestre el proceso y permitiendo el paralelismo para aumentar la velocidad del procesado
+control_knn <- trainControl(method = "repeatedcv",repeats = 5,number = 10, verboseIter = FALSE,allowParallel = TRUE,classProbs=TRUE)
+
+# Y definimos el grid de hiperparámetros a probar (k), de 1 a 100
+hiperparametros_knn<-expand.grid(k = seq(1, 100, 2)) 
+
+modelo_knn_Fol <- train(Fol ~ ., method = "knn", data = training_smote_Fol,trControl=control_knn,tuneGrid=hiperparametros_knn, metric = "Accuracy")
+
+# Representamos el accuracy para cada valor de k y plot representativo
+modelo_knn_Fol
+plot(modelo_knn_Fol)
+```
+
+Seleccionamos el mejor hiperparámetro ya que posteriormente lo emplearé en la optimización del modelo
+
+```{r}
+knn_k_Fol<-modelo_knn$bestTune[,1]
+```
+
+```{r}
+# Función predict para que prediga los resultados ya en el conjunto de test (al que eliminamos la variable respuesta)
+knn_predic_Fol <- predict(modelo_knn_Fol, test_boruta_Fol[,-1])
+# Para la evaluación, será de utilidad la función confusionMatrix()
+cm_knn_Fol<-confusionMatrix(knn_predic_Fol, test_boruta_Fol$Fol)
+cm_knn_Fol
+```
+
+## SVM
+
+Comenzaremos con el modelo linear y seleccionando en los hiperparámetros los valores de cost
+
+```{r}
+modelLookup('svmLinear')
+```
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+# Elegimos el hiperparámetro a estudio probando con distintos cost
+hiperparametros_linear <- expand.grid(C = c(0.01,0.1,1,10,50))
+
+control_svm <- trainControl(method = "repeatedcv", number = 10, repeats=3, verboseIter = FALSE, allowParallel = TRUE, classProbs = TRUE)
+
+# Entrenamos el modelo
+
+modelo_svmlin_Fol <- train(Fol ~ ., data = training_smote_Fol,method = "svmLinear",tuneGrid = hiperparametros_linear,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmlin_Fol
+plot(modelo_svmlin_Fol)
+```
+
+```{r}
+set.seed(230793)
+svm_linear_predic_Fol <- predict(modelo_svmlin_Fol, test_boruta_Fol[,-1])
+cm_svm_linear_Fol<-confusionMatrix(svm_linear_predic_Fol, test_boruta_Fol$Fol)
+cm_svm_linear_Fol
+```
+
+Probamos posteriormente con el modelo radial
+
+```{r}
+modelLookup('svmRadial')
+```
+
+En este caso también debemos seleccionar el hiperparámetro sigma, que especifica el ancho de la función de base radial, por lo que se modifica el tunegrid
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_radial <- expand.grid(sigma=c(0.001,0.01,0.1,1), C = c(0.1,10,50))
+
+modelo_svmrad_Fol <- train(Fol ~ ., data = training_smote_Fol,method = "svmRadial",tuneGrid = hiperparametros_radial,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmrad_Fol
+plot(modelo_svmrad_Fol)
+```
+
+```{r}
+svm_radial_predic_Fol <- predict(modelo_svmrad_Fol, test_boruta_Fol[,-1])
+cm_svm_radial_Fol<-confusionMatrix(svm_radial_predic_Fol, test_boruta_Fol$Fol)
+cm_svm_radial_Fol
+```
+
+Y finalmente comprobaremos el algoritmo con kernel polinómico
+
+```{r}
+modelLookup('svmPoly')
+```
+
+Aquí se debe seleccionar los hiperparámetros degree, scale y C, por lo que se vuelve a modificar el tunegrid
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_poly <- expand.grid(degree=c(2,3,4), scale=c(0.01,0.1,1), C = c(0.01,0.1,10,50))
+
+modelo_svmpoly_Fol <- train(Fol ~ ., data = training_smote_Fol,method = "svmPoly",tuneGrid = hiperparametros_poly,metric = "Accuracy",trControl = control_svm)
+
+modelo_svmpoly_Fol
+plot(modelo_svmpoly_Fol)
+```
+
+```{r}
+svm_poly_predic_Fol <- predict(modelo_svmpoly_Fol, test_boruta_Fol[,-1])
+cm_svm_poly_Fol<-confusionMatrix(svm_poly_predic_Fol, test_boruta_Fol$Fol)
+cm_svm_poly_Fol
+```
+
+El mejor modelo ha sido el de kernel radial por lo que nos interesa guardar sus hiperparámetros:
+
+```{r}
+svm_sigma_Fol<-modelo_svmrad_Fol$bestTune[,1]
+svm_c_Fol<-modelo_svmrad_Fol$bestTune[,2]
+```
+
+## Tree
+
+Este algoritmo tiene de hiperparámetro "cp" que representa la complejidad del árbol
+
+```{r}
+modelLookup('rpart')
+```
+
+```{r}
+set.seed(230793)
+
+hiperparametros_tree<-expand.grid(cp = c(0.001,0.1,0.5,1))
+
+control_tree <- trainControl(method = "repeatedcv", number=10,repeats= 5,verboseIter = FALSE, allowParallel = FALSE, classProbs=TRUE)
+
+modelo_tree_Fol <- train(Fol ~ ., data = training_smote_Fol, method = "rpart",metric = "Accuracy",tuneGrid=hiperparametros_tree,trControl = control_tree, maxdepth=2)
+
+modelo_tree_Fol
+plot(modelo_tree_Fol)
+```
+
+```{r}
+tree_predic_Fol <- predict(modelo_tree_Fol, test_boruta_Fol[,-1])
+cm_tree_Fol<-confusionMatrix(tree_predic_Fol, test_boruta_Fol$Fol)
+cm_tree_Fol
+```
+
+```{r}
+tree_cp_Fol<-modelo_tree_Fol$bestTune[,1]
+```
+
+## Random Forest
+
+```{r}
+modelLookup('ranger')
+```
+
+Modificamos en este caso los hiperparámetros mtry, min.node.size y splitrule
+
+```{r, cache=TRUE}
+set.seed(230793)
+hiperparametros_rf<-expand.grid(mtry =c(3,5,7,10,15),min.node.size=c(2,4,6),splitrule=c("gini","extratrees"))
+
+control_rf <- trainControl(method = "repeatedcv", number = 5, repeats=3, verboseIter = FALSE, allowParallel = FALSE, classProbs = TRUE)
+
+modelo_rf_Fol <- train(Fol ~ ., data = training_smote_Fol,method = "ranger",tuneGrid = hiperparametros_rf,metric = "Accuracy",trControl = control_rf,num.trees=500)
+
+modelo_rf_Fol
+plot(modelo_rf_Fol)
+```
+
+```{r}
+rf_predic_Fol <- predict(modelo_rf_Fol, test_boruta_Fol[,-1])
+cm_rf_Fol<- confusionMatrix(rf_predic_Fol, test_boruta_Fol$Fol)
+cm_rf_Fol
+```
+
+Nuevamente, seleccionamos los parámetros elegidos en el entrenamiento para posterior optimización
+
+```{r}
+rf_mtry_Fol<-modelo_rf_Fol$bestTune[,1]
+rf_splitrule_Fol<-modelo_rf_Fol$bestTune[,2]
+rf_node_Fol<-modelo_rf_Fol$bestTune[,3]
+```
+
+## Redes neuronales
+
+```{r}
+modelLookup('nnet')
+```
+
+```{r, cache=TRUE}
+set.seed(230793)
+
+hiperparametros_rn <- expand.grid(size = c(5,10,20,50),decay = c(0.001,0.01,0.1,1))
+
+control_rn <- trainControl(method = "repeatedcv", number = 3, verboseIter = FALSE, allowParallel = FALSE, classProbs = TRUE)
+
+# En este modelo tenemos que que ajustar el número máximo de iteraciones permitidas en la red neuronal MaxNWts, y seleccionamos trace=FALSE para que no nos muestre el proceso 
+
+modelo_rn_Fol <- train(Fol ~ ., data = training_smote_Fol,method = "nnet", tuneGrid = hiperparametros_rn,metric = "Accuracy",trControl = control_rn,trace=FALSE,MaxNWts = 10000)
+
+modelo_rn_Fol
+plot(modelo_rn_Fol)
+```
+
+```{r}
+rn_predic_Fol <- predict(modelo_rn_Fol, test_boruta_Fol[,-1])
+cm_rn_Fol<-confusionMatrix(rn_predic_Fol, test_boruta_Fol$Fol)
+```
+
+```{r}
+rn_size_Fol<-modelo_rn_Fol$bestTune[,1]
+rn_decay_Fol<-modelo_rn_Fol$bestTune[,2]
+```
+
+## eXtreme Gradient Boosting
+
+```{r}
+modelLookup('xgbTree')
+```
+
+```{r, cache=TRUE}
+hiperparametros_xgb <- expand.grid(nrounds = c(20,50,70),max_depth = c(7,15),eta = c(0.01,0.1,0.5),gamma=c(0.2,0.4),colsample_bytree=0.8,min_child_weight=c(1,3),subsample=0.8)
+
+control_train <- trainControl(method = "repeatedcv", number = 10,repeats = 3,returnResamp = "final", verboseIter = FALSE,allowParallel = TRUE, classProbs = TRUE)
+
+modelo_xgb_Fol <- train(Fol ~ ., data = training_smote_Fol, method = "xgbTree",tuneGrid = hiperparametros_xgb,metric = "Accuracy", iteration_range=100,trControl = control_train,verbose = FALSE, verbosity=0)
+
+modelo_xgb_Fol
+plot(modelo_xgb_Fol)
+```
+
+```{r}
+xgb_predic_Fol <- predict(modelo_xgb_Fol, test_boruta_Fol[,-1])
+cm_xgb_Fol<-confusionMatrix(xgb_predic_Fol, test_boruta_Fol$Fol)
+cm_xgb_Fol
+```
+
+```{r}
+xgb_nrounds_Fol<-modelo_xgb_Fol$bestTune[,1]
+xgb_maxdepth_Fol<-modelo_xgb_Fol$bestTune[,2]
+xgb_eta_Fol<-modelo_xgb_Fol$bestTune[,3]
+xgb_gamma_Fol<-modelo_xgb_Fol$bestTune[,4]
+xgb_colsample_Fol<-modelo_xgb_Fol$bestTune[,5]
+xgb_weight_Fol<-modelo_xgb_Fol$bestTune[,6]
+xgb_subsample_Fol<-modelo_xgb_Fol$bestTune[,7]
+```
+
+# Evaluación de los distintos modelos
+
+Comparamos el accuracy de todos nuestros confusionMatrix para evaluar los distintos modelos
+
+```{r}
+modelo_Fol<-c("knn","svmlin","svmradial","svmpoly","tree","rf","rn","xgb")
+
+F1_Fol<-c(cm_knn_Fol$byClass[7],cm_svm_linear_Fol$byClass[7],cm_svm_radial_Fol$byClass[7],cm_svm_poly_Fol$byClass[7],cm_tree_Fol$byClass[7],cm_rf_Fol$byClass[7],cm_rn_Fol$byClass[7],cm_xgb_Fol$byClass[7])
+
+accuracy_Fol<- c(cm_knn_Fol$overall[1],cm_svm_linear_Fol$overall[1],cm_svm_radial_Fol$overall[1],cm_svm_poly_Fol$overall[1],cm_tree_Fol$overall[1],cm_rf_Fol$overall[1],cm_rn_Fol$overall[1],cm_xgb_Fol$overall[1])
+
+kappa_Fol<-c(cm_knn_Fol$overall[2],cm_svm_linear_Fol$overall[2],cm_svm_radial_Fol$overall[2],cm_svm_poly_Fol$overall[2],cm_tree_Fol$overall[2],cm_rf_Fol$overall[2],cm_rn_Fol$overall[2],cm_xgb_Fol$overall[2])
+
+evaluacion_Fol<-data.frame(modelo_Fol,F1_Fol,accuracy_Fol,kappa_Fol)
+evaluacion_Fol
+```
+
+Representamos gráficamente comparando el accuracy entre los distintos modelos 
+
+```{r}
+df_plot_Fol<-cbind(as.data.frame(modelo_Fol),as.data.frame(accuracy_Fol),as.data.frame(kappa_Fol))
+
+library(ggplot2)
+ggplot(df_plot_Fol, aes(x=modelo,y=F1_Fol))+
+  geom_bar(stat="identity", fill="cornsilk3")+
+  geom_text(aes(label=paste(round(kappa,2),sep="")),color="red",vjust=-1,size=2)+
+  geom_point(aes(y=kappa),shape="*", color="red",size=5)+
+  labs(x="Modelo",y="F1-score",title="Comparación entre modelos")+
+  theme(axis.text.x=element_text(angle=45,hjust=1))+
+  theme(panel.grid=element_blank())
+```
+
+# Optimización del modelo
+
+## Voting
+
+Una opción posible para intentar mejorar las predicciones de los distintos algoritmos es juntar las decisiones para cada observación de cada uno de ellos y elegir la mayoritaria. En este caso, descartamos el algoritmo Tree ya que parece tener una menor precisión en comparación con el resto y puede aFolctar negativamente a los resultados y los algoritmos svm con kernel linear y polinómico ya que las observaciones son muy similares
+
+```{r}
+# En primer lugar convertimos todas las predicciones obtenidas en data.frame, para posteriormente unirlas mediante cbind()
+
+df_knn_predic_Fol<-as.data.frame(svm_linear_predic_Fol)
+df_svm_linear_predic_Fol<-as.data.frame(svm_linear_predic_Fol)
+df_svm_radial_predic_Fol<-as.data.frame(svm_radial_predic_Fol)
+df_rf_predic_Fol<-as.data.frame(rf_predic_Fol)
+df_rn_predic_Fol<-as.data.frame(rn_predic_Fol)
+df_xgb_predic_Fol<-as.data.frame(xgb_predic_Fol)
+
+df_stacking_Fol<-cbind(df_knn_predic_Fol,df_svm_radial_predic_Fol,df_rf_predic_Fol,df_rn_predic_Fol,df_xgb_predic_Fol)
+
+# Ejemplo de las predicciones de cada algoritmo para las 5 primeras observaciones
+head(df_stacking_Fol)
+
+# Generamos una función en la que obtengamos el valor más repetido de cada fila, y en caso de empate, lo asigne aleatoriamente
+prediccion_stacking_Fol <- apply(df_stacking_Fol, 1, function(row) {
+  tab <- table(row)  
+  nombres <- names(tab)  
+  max_frecuencia <- max(tab)  
+  resultado <- nombres[tab == max_frecuencia] 
+  return(resultado)
+})
+# Ejemplo de las 5 primeras observaciones
+head(prediccion_stacking_Fol)
+
+# Pasamos a factor para poder comparar las predicciones con su valor real
+factor_stacking_Fol<-as.data.frame(as.factor(prediccion_stacking_Fol))
+colnames(factor_stacking_Fol)[colnames(factor_stacking_Fol)=="as.factor(prediccion_stacking"]<-"Fol"
+
+# Finalmente realizamos el confusionMatrix
+cm_stacking_Fol <- confusionMatrix(factor_stacking_Fol$`as.factor(prediccion_stacking_Fol)`,test_boruta_Fol$Fol)
+cm_stacking_Fol
+cm_stacking_Fol$byClass[7]
+```
+
+## Stacking
+
+Los resultados anteriores no parecen mejorar significativamente el modelo. Para optimizarlo aún más nos serán de utilidad los paquetes caretEnsemble() y SuperLearner() de tal forma que podemos combinar las predicciones de los diferentes algoritmos utilizados anteriormente asignando un peso a cada uno, con el objetivo final de aumentar la precisión de nuestro modelo
+
+En primer lugar probaremos la librería caretEnsemble
+
+```{r}
+library(caretEnsemble)
+set.seed(230793)
+
+# En primer lugar definimos cuál va a ser nuestro método de validación cruzada y los modelos que vamos a entrenar
+ensemble_control_Fol<-trainControl(method="repeatedcv",number=10,repeats=3,savePredictions = "final", index = createResample(training_smote_Fol$Fol, 15), summaryFunction=twoClassSummary, classProbs=TRUE)
+
+learners<-c("knn","svmRadial","rpart","ranger","nnet","xgbTree")
+
+# Posteriormente entrenamos estos modelos
+modelos_Fol<-caretList(Fol~., data=training_smote_Fol, methodList=learners, trControl = ensemble_control_Fol)
+
+# Podemos ver la correlación entre los resultados de los modelos
+modelCor(resamples(modelos_Fol))
+
+# Combinamos los distintos modelos por stacking al que generamos un nuevo trainControl()
+stack_control_Fol<-trainControl(method="repeatedcv",number=10,repeats=3,savePredictions = "final", summaryFunction=twoClassSummary, classProbs=TRUE)
+
+modelo_stack_Fol<-caretStack(modelos_Fol,method="rf",metric="ROC",trControl=stack_control_Fol)
+
+prediccion_stacking_Fol<-predict(modelo_stack_Fol,test_boruta_Fol[,-1])
+prediccion_stacking_Fol_prob<-predict(modelo_stack_Fol,test_boruta_Fol[,-1],type="prob")
+prediccion_stacking_Fol
+cm_ensemble_Fol<-confusionMatrix(prediccion_stacking_Fol,test_boruta_Fol$Fol)
+cm_ensemble_Fol
+```
+
+Y luego comprobamos con SuperLearner. En primer lugar, separamos nuestros datos y convertimos la variable respuesta en numérico 0-1. En primer lugar, separamos nuestros datos y convertimos la variable respuesta en numérico 0-1
+
+```{r}
+library("SuperLearner")
+
+Fol_training<-as.numeric(training_smote_Fol[,1])-1
+Fol_test<-as.numeric(test_boruta_Fol[,1])-1
+
+vari_training_Fol <- data.frame(training_smote_Fol[,2:ncol(training_smote_Fol)])
+vari_test_Fol <- data.frame(test_boruta_Fol[,2:ncol(training_smote_Fol)])
+```
+
+El propio paquete realiza un ajuste de hiperparámetros de los distintos modelos, pero como los hemos calculado previamente podemos definir los que mayor rendimiento nos han dado en el entrenamiento para que realice el nuevo modelo con los mejores hiperparámetros. Para ello, mediante function() se modifican los hiperparámetros
+
+```{r}
+# kNN
+SL.knn.tuneFol <- function(...){
+  # Los 3 puntos permiten modificar únicamentelos hiperparámetros de la función que nos interesen
+      SL.knn(..., k=knn_k_Fol)
+}
+# SVM
+SL.svm.tuneFol <- function(...){
+      SL.svm(..., sigma=svm_sigma_Fol, C=svm_c_Fol,kernel = "radial")
+}
+# Tree
+SL.rpart.tuneFol <- function(...){
+      SL.knn(..., cp=tree_cp_Fol)
+}
+# Random Forest
+SL.ranger.tuneFol <- function(...){
+      SL.ranger(..., mtry=rf_mtry_Fol,min.node.size=rf_node_Fol,splitrule="extratrees")
+}
+# Red neuronal
+SL.nnet.tuneFol <- function(...){
+      SL.nnet(..., decay=rn_decay_Fol, size=rn_size_Fol,MaxNWts=10000)
+}
+# eXtreme Gradient Boosting
+SL.xgboost.tuneFol <- function(...){
+      SL.xgboost(...,nrounds=xgb_nrounds_Fol,max_depth=xgb_maxdepth_Fol,eta=xgb_eta_Fol,gamma=xgb_gamma_Fol, colsample_bytree=xgb_colsample_Fol,min_child_weight=xgb_weight_Fol,subsample=xgb_subsample_Fol)
+}
+```
+
+Posteriormente entrenamos el modelo mediante la función SuperLearner() indicando los algoritmos modificados y tipo binomial ya que nuestra variable respuesta es bicategórica
+
+```{r}
+set.seed(230793)
+super_combinado_Fol <- SuperLearner(Fol_training,vari_training_Fol,family=binomial(),SL.library=list("SL.knn.tuneFol","SL.svm.tuneFol","SL.rpart.tuneFol","SL.ranger.tuneFol","SL.nnet.tuneFol","SL.xgboost.tuneFol"))
+```
+
+Observamos el % de importancia de cada algoritmo al modelo, habiendo algunos que son excluidos 
+
+```{r}
+super_combinado_Fol
+```
+
+Finalmente, realizamos la predicción con nuestro conjunto test y lo representamos nuevamente en forma de confusionMatrix
+
+```{r}
+# onlySL para indicar que sólo entrenará con aquellos modelos que tengan algo de influencia
+predicciones_super_Fol <- predict.SuperLearner(super_combinado_Fol,vari_training_Fol,onlySL=TRUE,type="prob")
+
+# Podemos ver qué grado de probabilidad que le da cada modelo a ser de tipo "Déficit"
+predicciones_super_todos_Fol<-predicciones_super_Fol$library.predict
+head(predicciones_super_todos_Fol)
+
+# Tenemos que obtener la predicción combinada para cada observación
+prediccion_final_super_Fol<-predicciones_super_Fol$pred
+
+# Convertimos las probabilidades nuevamente en 0-1 y etiquetamos como déficit o normal
+prediccion_final_super_Fol<-ifelse(predicciones_super_Fol$pred>=0.5,1,0)
+prediccion_final_super_Fol<-as.data.frame(prediccion_final_super_Fol)
+prediccion_final_super_Fol$V1<-factor(prediccion_final_super_Fol$V1,levels = c(0,1),labels = c("Déficit", "Normal"))
+
+Fol_test_lista<-as.data.frame(Fol_test)
+Fol_test_lista$Fol_test<-factor(Fol_test_lista$Fol_test,levels = c(0,1),labels = c("Déficit", "Normal"))
+
+prediccion_final_super_Fol
+
+cm_super_Fol <- confusionMatrix(prediccion_final_super_Fol$V1,Fol_test_lista$Fol_test)
+cm_super_Fol
+```
+
+## Boosting
+
+Otra opción es la combinación de varios modelos, donde se da más enfasis a las instancias que se clasifican incorrectamente y posteriormente se ajustan los pesos de los modelos en base a sus resultados. Un ejemplo con el que lo podemos realizar es mediante la librería adabag()
+
+```{r}
+library(adabag)
+# Definimos los modelos que vamos a utilizar
+lista_modelos_Fol<-list(modelo_knn_Fol,modelo_svmrad_Fol,modelo_tree_Fol,modelo_rf_Fol,modelo_rn_Fol,modelo_xgb_Fol)
+
+# Entrenamos en base a esos modelos
+modelo_boosting_Fol<-boosting(Fol~.,training_smote_Fol,boos=TRUE,model=lista_modelos_Fol)
+
+# Como siempre, realizamos confusionMatrix sobre las nuevas predicciones
+boosting_predic_Fol <- predict(modelo_boosting_Fol, test_boruta_Fol[,-1],type="prob")
+cm_boosting_Fol<-confusionMatrix(as.factor(boosting_predic_Fol$class), test_boruta_Fol$Fol)
+cm_boosting_Fol
+cm_boosting_Fol$byClass[7]
+```
+
+# Transformación del modelo para su aplicación real 
+
+```{r}
+validacion_Fol<-ifelse(prediccion_stacking_Fol_prob<=0.25,"Normal",ifelse(prediccion_stacking_Fol_prob>=0.75,"Déficit","No concluyente"))
+
+df_validacion_Fol<-cbind(validacion_Fol,as.data.frame(test_boruta_Fol$Fol))
+
+no_concluyentes_Fol<-round(sum(df_validacion_Fol$validacion_Fol=="No concluyente") / nrow(df_validacion_Fol)*100,2)
+print(paste("El porcentaje de observaciones no concluyentes es ",no_concluyentes_Fol))
+
+filtrado_Fol<-df_validacion_Fol[df_validacion_Fol$validacion_Fol!="No concluyente",]
+
+VP_Fol<-sum(filtrado_Fol$validacion =="Déficit"& filtrado_Fol$`test_boruta_Fol$Fol` =="Déficit")
+VN_Fol<-sum(filtrado_Fol$validacion =="Normal"& filtrado_Fol$`test_boruta_Fol$Fol` =="Normal")
+FP_Fol<-sum(filtrado_Fol$validacion =="Déficit"& filtrado_Fol$`test_boruta_Fol$Fol` =="Normal")
+FN_Fol<-sum(filtrado_Fol$validacion =="Normal"& filtrado_Fol$`test_boruta_Fol$Fol` =="Déficit")
+
+Sensibilidad_Fol<-round((VP_Fol/(VP_Fol+FN_Fol)),2)
+Especificidad_Fol<-round((VN_Fol/(VN_Fol+FP_Fol)),2)
+
+print(paste("Con un % de no concluyentes de",no_concluyentes_Fol, "se obtuvo una sensibilidad de",Sensibilidad_Fol," y una especificidad de", Especificidad_Fol,"y que permitió clasificar correctamente a",VP_Fol+VN_Fol,"pacientes"))
+```
